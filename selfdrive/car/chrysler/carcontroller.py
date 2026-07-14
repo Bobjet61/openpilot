@@ -120,12 +120,27 @@ class CarController(CarControllerBase):
     counter_changed = (CS.das_3.get('COUNTER') != self.last_das_3_counter)
     self.last_das_3_counter = CS.das_3.get('COUNTER')
 
-    # Brake hold activation: engage when ACC is decelerating to a stop (matching jvePilot)
+    # Diagnostic snapshot every ~1 second
+    if self.frame % 50 == 0:
+      cloudlog.info(
+        "Brake hold debug: "
+        f"hold={CS.brake_hold}, "
+        f"cruise_active_actual={CS.cruise_active_actual}, "
+        f"acc_decelerating={CS.acc_decelerating}, "
+        f"standstill={CS.out.standstill}, "
+        f"cruise_enabled={CS.out.cruiseState.enabled}, "
+        f"gas={CS.out.gasPressed}, "
+        f"brake={CS.out.brakePressed}, "
+        f"forward_gear={CS.forward_gear}, "
+        f"das3_counter={CS.das_3.get('COUNTER')}, "
+        f"acc_decel={CS.das_3.get('ACC_DECEL')}"
+      )
+
+    # Brake hold activation: engage when ACC is decelerating to a stop
     if (not CS.brake_hold and
         CS.cruise_active_actual and CS.acc_decelerating and CS.out.standstill):
       CS.brake_hold = True
       cloudlog.info("Brake hold: ACTIVATING - ACC decelerating to standstill")
-
     # Brake hold deactivation: release ONLY on driver intervention (not on ACC/openpilot state changes)
     # This allows brake hold to persist even when ACC times out or openpilot disables
     if (CS.brake_hold and
