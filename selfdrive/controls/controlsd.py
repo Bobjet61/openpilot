@@ -324,7 +324,28 @@ class Controls:
         safety_mismatch = pandaState.safetyModel not in IGNORED_SAFETY_MODES
 
       # safety mismatch allows some time for pandad to set the safety mode and publish it back from panda
-      if (safety_mismatch and self.sm.frame*DT_CTRL > 10.) or pandaState.safetyRxChecksInvalid or self.mismatch_counter >= 200:
+      controls_mismatch = (safety_mismatch and self.sm.frame*DT_CTRL > 10.) or \
+                          pandaState.safetyRxChecksInvalid or self.mismatch_counter >= 200
+      if controls_mismatch:
+        # Diagnostic only: identify which independent condition caused the red Controls Mismatch alert.
+        # Throttled to one record per second so the route log remains usable.
+        if self.sm.frame % int(1. / DT_CTRL) == 0:
+          expected = self.CP.safetyConfigs[i] if i < len(self.CP.safetyConfigs) else None
+          cloudlog.error(
+            "BRAKE_HOLD_DIAG controlsMismatch "
+            f"panda={i} safety_mismatch={safety_mismatch} "
+            f"rx_invalid={pandaState.safetyRxChecksInvalid} "
+            f"mismatch_counter={self.mismatch_counter} "
+            f"controls_allowed={pandaState.controlsAllowed} "
+            f"actual_model={pandaState.safetyModel} actual_param={pandaState.safetyParam} "
+            f"actual_alt_exp={pandaState.alternativeExperience} "
+            f"expected_model={getattr(expected, 'safetyModel', None)} "
+            f"expected_param={getattr(expected, 'safetyParam', None)} "
+            f"expected_alt_exp={self.CP.alternativeExperience} "
+            f"enabled={self.enabled} active={self.active} "
+            f"cruise_enabled={CS.cruiseState.enabled} "
+            f"brake_hold={CS.brakeHoldActive}"
+          )
         self.events.add(EventName.controlsMismatch)
 
       if log.PandaState.FaultType.relayMalfunction in pandaState.faults:
@@ -482,6 +503,15 @@ class Controls:
     if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
            if ps.safetyModel not in IGNORED_SAFETY_MODES):
       self.mismatch_counter += 1
+      if self.mismatch_counter in (1, 2, 10, 50, 100, 150, 199):
+        cloudlog.error(
+          "BRAKE_HOLD_DIAG controlsAllowed disagreement "
+          f"mismatch_counter={self.mismatch_counter} "
+          f"enabled={self.enabled} active={self.active} "
+          f"pandas={[{'model': ps.safetyModel, 'param': ps.safetyParam, 'controlsAllowed': ps.controlsAllowed, 'rxInvalid': ps.safetyRxChecksInvalid} for ps in self.sm['pandaStates']]} "
+          f"cruise_enabled={CS.cruiseState.enabled} "
+          f"brake_hold={CS.brakeHoldActive}"
+        )
 
     return CS
 
