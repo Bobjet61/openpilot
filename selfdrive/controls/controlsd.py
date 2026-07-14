@@ -404,7 +404,7 @@ class Controls:
 
     if not REPLAY:
       # Check for mismatch between openpilot and car's PCM
-      cruise_mismatch = CS.cruiseState.enabled and not self.enabled
+      cruise_mismatch = CS.cruiseState.enabled and not self.enabled and not CS.brakeHoldActive
       self.cruise_mismatch_counter = self.cruise_mismatch_counter + 1 if cruise_mismatch else 0
       if self.cruise_mismatch_counter > int(6. / DT_CTRL):
         self.events.add(EventName.cruiseMismatch)

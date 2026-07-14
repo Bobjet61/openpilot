@@ -3,13 +3,19 @@ from common.conversions import Conversions as CV
 from opendbc.can.packer import CANPacker
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL
+from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
-from openpilot.selfdrive.car.chrysler.values import RAM_CARS, RAM_DT, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
+from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
 from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
 
 BUTTONS_STATES = ["accelCruise", "decelCruise", "cancel", "resumeCruise"]
+
+BRAKE_HOLD_CARS = {
+  CAR.JEEP_GRAND_CHEROKEE,
+  CAR.JEEP_GRAND_CHEROKEE_2019,
+}
 
 
 class CarController(CarControllerBase):
@@ -22,6 +28,8 @@ class CarController(CarControllerBase):
     self.last_lkas_falling_edge = 0
     self.lkas_control_bit_prev = False
     self.last_button_frame = 0
+    self.bh_hold_decel = -2.0
+    self.last_das_3_counter = -1
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -181,6 +189,9 @@ class CarController(CarControllerBase):
 
       can_sends.append(chryslercan.create_lkas_command(self.packer, self.CP, int(apply_steer), lkas_control_bit))
 
+    if self.CP.carFingerprint in BRAKE_HOLD_CARS:
+      self.brake_hold(CC, CS, can_sends)
+
     self.frame += 1
 
     new_actuators = CC.actuators.as_builder()
@@ -188,6 +199,70 @@ class CarController(CarControllerBase):
     new_actuators.steerOutputCan = self.apply_steer_last
 
     return new_actuators, can_sends
+
+  def brake_hold(self, CC, CS, can_sends):
+    """Maintain stock ACC braking after the Jeep's stop-and-go timeout."""
+    if not CS.das_3:
+      return
+
+    counter = CS.das_3.get("COUNTER")
+    counter_changed = counter != self.last_das_3_counter
+    self.last_das_3_counter = counter
+
+    if (not CS.brake_hold and CS.cruise_active_actual and
+        CS.acc_decelerating and CS.out.standstill):
+      CS.brake_hold = True
+      cloudlog.info("Brake hold: ACTIVATING - ACC decelerating to standstill")
+
+    if (CS.brake_hold and
+        (CC.cruiseControl.cancel or CS.out.gasPressed or
+         CS.out.brakePressed or not CS.forward_gear or
+         not CS.out.standstill)):
+      CS.brake_hold = False
+      cloudlog.info("Brake hold: DEACTIVATING")
+      return
+
+    if not CS.brake_hold:
+      return
+
+    if CS.cruise_active_actual:
+      if CS.out.standstill:
+        self.bh_hold_decel = min(
+          self.bh_hold_decel,
+          CS.das_3.get("ACC_DECEL", -2.0),
+        )
+      else:
+        self.bh_hold_decel = -2.0
+      return
+
+    counter_offset = 2 if counter_changed else 3
+    can_sends.append(chryslercan.das_3_command(
+      self.packer,
+      counter_offset,
+      False,  # go
+      False,  # torque request
+      None,   # torque
+      2,      # maximum requested gear
+      False,  # standstill flag
+      self.bh_hold_decel,
+      False,  # brake preparation
+      CS.das_3,
+    ))
+
+    if self.frame % 10 == 0:
+      can_sends.append(chryslercan.create_cruise_buttons(
+        self.packer,
+        CS.button_counter + 1,
+        0,
+        self.CP,
+        resume=True,
+      ))
+
+    if self.frame % 50 == 0:
+      cloudlog.info(
+        f"Brake hold: Sending DAS_3 - decel={self.bh_hold_decel}, "
+        f"counter_offset={counter_offset}"
+      )
 
   # multikyd methods, sunnyhaibin logic
   def get_cruise_buttons_status(self, CS):

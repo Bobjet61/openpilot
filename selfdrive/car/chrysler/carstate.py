@@ -135,6 +135,7 @@ class CarState(CarStateBase):
     self.button_counter = cp.vl["CRUISE_BUTTONS"]["COUNTER"]
     self.cruise_buttons = cp.vl["CRUISE_BUTTONS"]
     self.das_3 = dict(cp_cruise.vl["DAS_3"])
+    ret.brakeHoldActive = self.brake_hold
 
     return ret
 
