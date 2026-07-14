@@ -11,12 +11,6 @@ from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
 
 BUTTONS_STATES = ["accelCruise", "decelCruise", "cancel", "resumeCruise"]
 
-# Chrysler/Jeep standstill brake-hold (stop-and-go): re-tap "resume" before the Jeep's
-# native ~2s ACC release, so the brake stays held in traffic and it follows again when the
-# lead moves. Uses only the existing cruise-button path -- no messaging changes.
-STANDSTILL_HOLD_TAP_INTERVAL = 75   # frames (~0.75s) between resume taps; must beat the ~2s release
-STANDSTILL_HOLD_TAP_LEN = 10        # frames (~0.10s) each tap is held
-
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_name, CP, VM):
@@ -62,8 +56,6 @@ class CarController(CarControllerBase):
     self.m_tsc = 0
     self.steady_speed = 0
     self.button_frame = 0
-    self.last_standstill_tap = -STANDSTILL_HOLD_TAP_INTERVAL
-    self.standstill_tap_end = 0
 
   def update(self, CC, CS, now_nanos):
     if not self.CP.pcmCruiseSpeed:
@@ -106,23 +98,6 @@ class CarController(CarControllerBase):
 
     ram_cars = self.CP.carFingerprint in RAM_CARS
 
-    # Standstill brake-hold: only while the stock ACC is enabled and holding at a stop, in a
-    # forward gear, with no driver override. No lead check (kept minimal to avoid messaging).
-    standstill_hold = (not ram_cars
-                       and CS.out.cruiseState.enabled
-                       and CS.out.cruiseState.standstill
-                       and CS.out.gearShifter in FORWARD_GEARS
-                       and not CS.out.brakePressed
-                       and not CS.out.gasPressed
-                       and not CC.cruiseControl.cancel
-                       and not CC.cruiseControl.resume)
-    if standstill_hold:
-      if self.frame - self.last_standstill_tap >= STANDSTILL_HOLD_TAP_INTERVAL:
-        self.last_standstill_tap = self.frame
-        self.standstill_tap_end = self.frame + STANDSTILL_HOLD_TAP_LEN
-    else:
-      self.standstill_tap_end = 0
-    standstill_tapping = standstill_hold and self.frame < self.standstill_tap_end
 
     das_bus = 2 if self.CP.carFingerprint in RAM_CARS else 0
     # cruise buttons
@@ -147,12 +122,8 @@ class CarController(CarControllerBase):
         self.last_button_frame = self.frame
         can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + 1, das_bus, self.CP, resume=True))
 
-      # Standstill brake-hold: momentary resume tap to beat the native ~2s release
-      elif standstill_tapping:
-        self.last_button_frame = self.frame
-        can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + 1, das_bus, self.CP, resume=True))
 
-      if not (CC.cruiseControl.cancel or CC.cruiseControl.resume or standstill_tapping) and not self.CP.pcmCruiseSpeed and CS.out.cruiseState.enabled:
+      if not (CC.cruiseControl.cancel or CC.cruiseControl.resume) and not self.CP.pcmCruiseSpeed and CS.out.cruiseState.enabled:
         self.button_frame += 1
         button_counter_offset = [1, 1, 0, None][self.button_frame % 4]
         if ram_cars:
