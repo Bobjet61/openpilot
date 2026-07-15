@@ -4,11 +4,13 @@ from opendbc.can.parser import CANParser
 from opendbc.can.can_define import CANDefine
 from openpilot.selfdrive.car.interfaces import CarStateBase
 from openpilot.selfdrive.car.chrysler.values import DBC, STEER_THRESHOLD, RAM_CARS, BUTTON_STATES
+from common.swaglog import cloudlog
 
 
 class CarState(CarStateBase):
   def __init__(self, CP):
     super().__init__(CP)
+    self.release_diag_counter = 0
     self.CP = CP
     can_define = CANDefine(DBC[CP.carFingerprint]["pt"])
 
@@ -93,6 +95,19 @@ class CarState(CarStateBase):
 
     ret.cruiseState.available = cp_cruise.vl["DAS_3"]["ACC_AVAILABLE"] == 1
     ret.cruiseState.enabled = cp_cruise.vl["DAS_3"]["ACC_ACTIVE"] == 1
+
+    self.release_diag_counter += 1
+    if self.release_diag_counter % 100 == 0:
+      das3 = cp_cruise.vl["DAS_3"]
+      cloudlog.info(
+        "RELEASE_DIAG DAS3 "
+        f"available={das3.get('ACC_AVAILABLE')} "
+        f"active={das3.get('ACC_ACTIVE')} "
+        f"standstill_sig={das3.get('ACC_STANDSTILL')} "
+        f"cruise_available={ret.cruiseState.available} "
+        f"cruise_enabled={ret.cruiseState.enabled} "
+        f"standstill={ret.standstill} vEgo={ret.vEgo:.3f}"
+      )
     ret.cruiseState.speed = cp_cruise.vl["DAS_4"]["ACC_SET_SPEED_KPH"] * CV.KPH_TO_MS
     ret.cruiseState.nonAdaptive = cp_cruise.vl["DAS_4"]["ACC_STATE"] in (1, 2)  # 1 NormalCCOn and 2 NormalCCSet
     ret.cruiseState.standstill = cp_cruise.vl["DAS_3"]["ACC_STANDSTILL"] == 1
