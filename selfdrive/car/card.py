@@ -62,6 +62,9 @@ class Car:
     if self.mads_dlob:
       self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ENABLE_MADS
     elif self.mads_ndlob:
+      # Keep SunnyPilot's native MADS bit (64), and also send the older
+      # Panda always-on-lateral compatibility bit (32).
+      self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ENABLE_MADS
       self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.MADS_DISABLE_DISENGAGE_LATERAL_ON_BRAKE
 
     if self.CP.customStockLongAvailable and self.CP.pcmCruise and self.params.get_bool("CustomStockLong"):
