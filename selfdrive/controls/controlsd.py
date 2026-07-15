@@ -500,8 +500,20 @@ class Controls:
       self.mismatch_counter = 0
 
     # All pandas not in silent mode must have controlsAllowed when openpilot is enabled
-    if self.enabled and any(not ps.controlsAllowed for ps in self.sm['pandaStates']
-           if ps.safetyModel not in IGNORED_SAFETY_MODES):
+    # SunnyPilot MADS can intentionally keep Chrysler lateral control active
+    # through Panda's always-on-lateral path while controlsAllowed is false.
+    # Panda still enforces steering limits; avoid treating this expected AOL
+    # state as a controls mismatch when ACC main remains available.
+    chrysler_mads_aol = (
+      self.CP.carName == "chrysler" and
+      bool(self.CP.alternativeExperience & 32) and
+      CS.cruiseState.available and
+      not CS.cruiseState.enabled
+    )
+
+    if (self.enabled and not chrysler_mads_aol and
+        any(not ps.controlsAllowed for ps in self.sm['pandaStates']
+            if ps.safetyModel not in IGNORED_SAFETY_MODES)):
       self.mismatch_counter += 1
       if self.mismatch_counter in (1, 2, 10, 50, 100, 150, 199):
         cloudlog.error(
