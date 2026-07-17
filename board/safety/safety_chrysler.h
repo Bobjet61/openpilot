@@ -89,6 +89,7 @@ const CanMsg CHRYSLER_TX_MSGS[] = {
   {CHRYSLER_ADDRS.CRUISE_BUTTONS, 0, 3},
   {CHRYSLER_ADDRS.LKAS_COMMAND, 0, 6},
   {CHRYSLER_ADDRS.DAS_6, 0, 8},
+  {CHRYSLER_ADDRS.DAS_3, 0, 8},
   {CHRYSLER_ADDRS.LKAS_HEARTBIT, 0, 5},
 };
 
@@ -141,6 +142,8 @@ typedef enum {
 } ChryslerPlatform;
 ChryslerPlatform chrysler_platform = CHRYSLER_PACIFICA;
 const ChryslerAddrs *chrysler_addrs = &CHRYSLER_ADDRS;
+static uint8_t chrysler_das_3_last[8] = {0};
+static bool chrysler_das_3_last_valid = false;
 
 static uint32_t chrysler_get_checksum(const CANPacket_t *to_push) {
   int checksum_byte = GET_LEN(to_push) - 1U;
@@ -197,6 +200,11 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
   // enter controls on rising edge of ACC, exit controls on ACC off
   const int das_3_bus = (chrysler_platform == CHRYSLER_PACIFICA) ? 0 : 2;
   if ((bus == das_3_bus) && (addr == chrysler_addrs->DAS_3)) {
+    for (int i = 0; i < 8; i++) {
+      chrysler_das_3_last[i] = GET_BYTE(to_push, i);
+    }
+    chrysler_das_3_last_valid = true;
+
     bool cruise_engaged = GET_BIT(to_push, 21U);
     pcm_cruise_check(cruise_engaged);
 
@@ -228,9 +236,41 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
   generic_rx_checks((bus == 0) && (addr == chrysler_addrs->LKAS_COMMAND));
 }
 
+static bool chrysler_das_3_tx_allowed(const CANPacket_t *to_send) {
+  if ((chrysler_platform != CHRYSLER_PACIFICA) || !chrysler_das_3_last_valid ||
+      !acc_main_on || vehicle_moving || gas_pressed || brake_pressed) {
+    return false;
+  }
+
+  const uint8_t allowed_masks[8] = {0x60U, 0x00U, 0x3FU, 0xFFU, 0x7FU, 0x00U, 0xF2U, 0xFFU};
+  for (int i = 0; i < 8; i++) {
+    if (((GET_BYTE(to_send, i) ^ chrysler_das_3_last[i]) & (uint8_t)(~allowed_masks[i])) != 0U) {
+      return false;
+    }
+  }
+
+  const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) | GET_BYTE(to_send, 3);
+  const int counter = GET_BYTE(to_send, 6) >> 4;
+  const int last_counter = chrysler_das_3_last[6] >> 4;
+  const int counter_delta = (counter - last_counter) & 0xFU;
+
+  return ((GET_BYTE(to_send, 0) & 0x60U) == 0U) &&
+         ((GET_BYTE(to_send, 2) & 0x30U) == 0x30U) &&
+         ((GET_BYTE(to_send, 4) & 0xFU) == 2U) &&
+         (((GET_BYTE(to_send, 4) >> 4) & 0x7U) == 1U) &&
+         ((GET_BYTE(to_send, 6) & 0x2U) == 0U) &&
+         (decel_raw >= 2456) && (decel_raw <= 3275) &&
+         ((counter_delta == 2) || (counter_delta == 3)) &&
+         (GET_BYTE(to_send, 7) == chrysler_compute_checksum(to_send));
+}
+
 static bool chrysler_tx_hook(const CANPacket_t *to_send) {
   bool tx = true;
   int addr = GET_ADDR(to_send);
+
+  if (addr == chrysler_addrs->DAS_3) {
+    tx = chrysler_das_3_tx_allowed(to_send);
+  }
 
   // STEERING
   if (addr == chrysler_addrs->LKAS_COMMAND) {
@@ -253,7 +293,12 @@ static bool chrysler_tx_hook(const CANPacket_t *to_send) {
     const bool is_resume = GET_BYTE(to_send, 0) == 0x10U;
     const bool is_accel = GET_BIT(to_send, 2);
     const bool is_decel = GET_BIT(to_send, 3);
-    const bool allowed = is_cancel || ((is_resume || is_accel || is_decel) && controls_allowed && controls_allowed_long);
+    // Permit RESUME after the stock stop-and-go timeout only while stopped
+    // and while ACC main remains on. ACCEL and DECEL retain normal authorization.
+    const bool allow_resume_standstill = is_resume && acc_main_on && !vehicle_moving;
+    const bool allowed = is_cancel || allow_resume_standstill ||
+                         ((is_resume || is_accel || is_decel) &&
+                          controls_allowed && controls_allowed_long);
     if (!allowed) {
       tx = false;
     }
@@ -283,6 +328,7 @@ static int chrysler_fwd_hook(int bus_num, int addr) {
 
 static safety_config chrysler_init(uint16_t param) {
   safety_config ret;
+  chrysler_das_3_last_valid = false;
 
   bool enable_ram_dt = GET_FLAG(param, CHRYSLER_PARAM_RAM_DT);
   if (enable_ram_dt) {

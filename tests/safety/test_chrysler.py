@@ -7,7 +7,7 @@ from panda.tests.safety.common import CANPackerPanda
 
 
 class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSafetyTest):
-  TX_MSGS = [[0x23B, 0], [0x292, 0], [0x2A6, 0]]
+  TX_MSGS = [[0x23B, 0], [0x292, 0], [0x2A6, 0], [0x1F4, 0]]
   STANDSTILL_THRESHOLD = 0
   RELAY_MALFUNCTION_ADDRS = {0: (0x292,)}
   FWD_BLACKLISTED_ADDRS = {2: [0x292, 0x2A6]}
@@ -36,6 +36,11 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
 
   def _pcm_status_msg(self, enable):
     values = {"ACC_ACTIVE": enable}
+    return self.packer.make_can_msg_panda("DAS_3", self.DAS_BUS, values)
+
+  def _das_3_msg(self, counter=1, **changes):
+    values = {"COUNTER": counter}
+    values.update(changes)
     return self.packer.make_can_msg_panda("DAS_3", self.DAS_BUS, values)
 
   def _speed_msg(self, speed):
@@ -71,6 +76,56 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
       # only one button at a time
       self.assertFalse(self._tx(self._button_msg(cancel=True, resume=True)))
       self.assertFalse(self._tx(self._button_msg(cancel=False, resume=False)))
+
+
+  def test_auto_resume_at_standstill(self):
+    if self.DAS_BUS != 0:
+      self.skipTest("Jeep/Pacifica only")
+
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
+
+    self.assertTrue(self._rx(self._das_3_msg(counter=1, ACC_AVAILABLE=1)))
+    self._rx(self._speed_msg(0))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._tx(self._button_msg(resume=True)))
+
+    self._rx(self._speed_msg(1))
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
+
+    self._rx(self._speed_msg(0))
+    self._rx(self._das_3_msg(counter=2, ACC_AVAILABLE=0))
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
+
+  def test_das_3_brake_hold(self):
+    if self.DAS_BUS != 0:
+      self.skipTest("Jeep/Pacifica only")
+
+    hold = {"ACC_AVAILABLE": 1, "ACC_ACTIVE": 1, "ACC_DECEL_REQ": 1,
+            "ACC_DECEL": -2.0, "GR_MAX_REQ": 2}
+
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
+    self.assertTrue(self._rx(self._das_3_msg(counter=1, ACC_AVAILABLE=1)))
+    self.assertTrue(self._tx(self._das_3_msg(counter=3, **hold)))
+
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, ACC_GO=1, **hold)))
+    self.assertFalse(self._tx(self._das_3_msg(counter=5, **hold)))
+
+    excessive = hold.copy()
+    excessive["ACC_DECEL"] = -5.0
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, **excessive)))
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, ENGINE_TORQUE_REQUEST_MAX=1, **hold)))
+
+    self._rx(self._speed_msg(1))
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
+    self._rx(self._speed_msg(0))
+
+    self._rx(self._user_gas_msg(1))
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
+    self._rx(self._user_gas_msg(0))
+
+    self._rx(self._user_brake_msg(True))
+    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
 
 
 class TestChryslerRamDTSafety(TestChryslerSafety):
