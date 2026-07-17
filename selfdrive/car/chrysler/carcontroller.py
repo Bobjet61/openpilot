@@ -30,6 +30,7 @@ class CarController(CarControllerBase):
     self.last_button_frame = 0
     self.bh_hold_decel = -2.0
     self.last_das_3_counter = -1
+    self.bh_last_resume_frame = -100
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -212,6 +213,7 @@ class CarController(CarControllerBase):
     if (not CS.brake_hold and CS.cruise_active_actual and
         CS.acc_decelerating and CS.out.standstill):
       CS.brake_hold = True
+      self.bh_last_resume_frame = self.frame - 10
       cloudlog.info("Brake hold: ACTIVATING - ACC decelerating to standstill")
 
     if (CS.brake_hold and
@@ -249,7 +251,7 @@ class CarController(CarControllerBase):
       CS.das_3,
     ))
 
-    if self.frame % 10 == 0:
+    if self.frame - self.bh_last_resume_frame >= 10:
       can_sends.append(chryslercan.create_cruise_buttons(
         self.packer,
         CS.button_counter + 1,
@@ -257,6 +259,7 @@ class CarController(CarControllerBase):
         self.CP,
         resume=True,
       ))
+      self.bh_last_resume_frame = self.frame
 
     if self.frame % 50 == 0:
       cloudlog.info(
