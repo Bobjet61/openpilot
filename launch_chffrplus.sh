@@ -8,7 +8,28 @@ source "$BASEDIR/launch_env.sh"
 
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
 
+function restore_stock_boot_logo {
+  local boot_logo="/usr/comma/bg.jpg"
+  local stock_boot_logo="$DIR/selfdrive/assets/stock_boot_logo.jpg"
+
+  if [ -f "$stock_boot_logo" ] && ! cmp -s "$stock_boot_logo" "$boot_logo"; then
+    local stock_mount_options
+    stock_mount_options="$(findmnt -no OPTIONS /)"
+    [ -z "$stock_mount_options" ] && return
+    echo "Restoring stock comma boot logo"
+
+    if sudo mount -o remount,rw /; then
+      if sudo cp "$stock_boot_logo" "$boot_logo"; then
+        sudo chmod 644 "$boot_logo"
+      fi
+      sudo mount -o "remount,$stock_mount_options" /
+    fi
+  fi
+}
+
 function agnos_init {
+  restore_stock_boot_logo
+
   # TODO: move this to agnos
   sudo rm -f /data/etc/NetworkManager/system-connections/*.nmmeta
 
