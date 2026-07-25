@@ -57,7 +57,9 @@ class CarInterface(CarInterfaceBase):
       # feedback response at freeway speed without changing max torque.
       ret.lateralTuning.pid.kpBP, ret.lateralTuning.pid.kiBP = [[9., 20., 35.], [9., 20., 35.]]
       ret.lateralTuning.pid.kpV, ret.lateralTuning.pid.kiV = [[0.15, 0.30, 0.27], [0.03, 0.05, 0.045]]
-      ret.lateralTuning.pid.kf = 0.00006
+      # Increase planned-curve feedforward without restoring the high-speed
+      # feedback gain that amplified bump-induced steering corrections.
+      ret.lateralTuning.pid.kf = 0.000069
 
     # Ram
     elif candidate == CAR.RAM_1500_5TH_GEN:
