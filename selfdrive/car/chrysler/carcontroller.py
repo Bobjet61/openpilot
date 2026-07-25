@@ -6,7 +6,7 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
-from openpilot.selfdrive.car.chrysler.apa50 import Apa50ModeController
+from openpilot.selfdrive.car.chrysler.apa5 import Apa5ModeController
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
 from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
@@ -32,8 +32,8 @@ class CarController(CarControllerBase):
     self.bh_hold_decel = -2.0
     self.last_das_3_counter = -1
     self.bh_last_resume_frame = -100
-    self.apa50_mode = Apa50ModeController()
-    self.apa50_envelope = self.apa50_mode.update(0.0, eligible=False)
+    self.apa5_mode = Apa5ModeController()
+    self.apa5_envelope = self.apa5_mode.update(0.0, eligible=False)
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -104,25 +104,26 @@ class CarController(CarControllerBase):
       self.slc_active_stock = slc_active
 
     lkas_active = CC.latActive and CS.madsEnabled
-    apa50_eligible = (
+    apa5_eligible = (
       bool(self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20) and
       lkas_active and
       CS.out.gearShifter in FORWARD_GEARS and
       CS.out.cruiseState.available and
       not CS.out.brakePressed and
+      not CS.out.steeringPressed and
       not CS.out.steerFaultTemporary and
       not CS.out.steerFaultPermanent
     )
-    self.apa50_envelope = self.apa50_mode.update(CS.out.vEgo, apa50_eligible)
+    self.apa5_envelope = self.apa5_mode.update(CS.out.vEgo, apa5_eligible)
 
     if self.frame % 100 == 0 and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       cloudlog.info(
-        f"APA50 shadow: eligible={apa50_eligible}, "
-        f"speed={self.apa50_envelope.speed_mph:.1f} mph, "
-        f"extra={self.apa50_envelope.extra_authority:.3f}, "
-        f"multiplier={self.apa50_envelope.torque_multiplier:.3f}, "
-        f"shadow_type={self.apa50_envelope.shadow_steer_type}, "
-        f"commanded_type={self.apa50_envelope.commanded_steer_type}"
+        f"APA5 shadow: eligible={apa5_eligible}, "
+        f"speed={self.apa5_envelope.speed_mph:.1f} mph, "
+        f"extra={self.apa5_envelope.extra_authority:.3f}, "
+        f"multiplier={self.apa5_envelope.torque_multiplier:.3f}, "
+        f"shadow_type={self.apa5_envelope.shadow_steer_type}, "
+        f"commanded_type={self.apa5_envelope.commanded_steer_type}"
       )
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
@@ -174,7 +175,7 @@ class CarController(CarControllerBase):
       if CS.lkas_car_model != -1:
         can_sends.append(chryslercan.create_lkas_hud(self.packer, self.CP, lkas_active, CS.madsEnabled, CC.hudControl.visualAlert,
                                                      self.hud_count, CS.lkas_car_model, CS.auto_high_beam,
-                                                     self.apa50_envelope.commanded_steer_type))
+                                                     self.apa5_envelope.commanded_steer_type))
         self.hud_count += 1
 
     # steering
