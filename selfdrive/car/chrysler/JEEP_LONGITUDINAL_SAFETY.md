@@ -42,6 +42,10 @@ Before actuation can be considered, the following must still be completed:
 - only after review, design closed-course tests beginning with propulsion
   disabled.
 
+The wiring, power, termination, capture, fault-injection, and stop criteria for
+that stage are defined in
+`JEEP_LONGITUDINAL_DISCONNECTED_BENCH.md`.
+
 The prior XPS patch is not a safety baseline: it relaxed steering error limits
 and disabled receive checks.
 
