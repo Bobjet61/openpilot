@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 LONG_PATH = Path(__file__).resolve().parents[1] / "jeep_longitudinal.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
@@ -13,15 +14,63 @@ LONG_SPEC.loader.exec_module(LONG)
 ACCEL_MAX = LONG.ACCEL_MAX
 ACCEL_MIN = LONG.ACCEL_MIN
 JEEP_LONG_ACTUATION_COMPILED = LONG.JEEP_LONG_ACTUATION_COMPILED
+JEEP_LONG_SHADOW_TRANSPORT_COMPILED = LONG.JEEP_LONG_SHADOW_TRANSPORT_COMPILED
 JeepLongitudinalShadow = LONG.JeepLongitudinalShadow
 fca_checksum = LONG.fca_checksum
+jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
 
 class TestJeepLongitudinalShadow(unittest.TestCase):
   def test_actuation_is_compile_time_off(self):
     self.assertFalse(JEEP_LONG_ACTUATION_COMPILED)
+    self.assertFalse(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
+    self.assertFalse(result.transport_enabled)
     self.assertFalse(result.host_enabled)
+
+  def test_transport_and_actuation_are_independent_fail_closed_gates(self):
+    with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):
+      transport_only = JeepLongitudinalShadow().update(-1.0, eligible=True)
+      self.assertTrue(transport_only.transport_enabled)
+      self.assertFalse(transport_only.host_enabled)
+
+    with (
+      patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", False),
+      patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", True),
+    ):
+      invalid_actuation_only = JeepLongitudinalShadow().update(
+        -1.0, eligible=True,
+      )
+      self.assertFalse(invalid_actuation_only.transport_enabled)
+      self.assertFalse(invalid_actuation_only.host_enabled)
+
+    with (
+      patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True),
+      patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", True),
+    ):
+      hypothetical_both = JeepLongitudinalShadow().update(
+        -1.0, eligible=True,
+      )
+      self.assertTrue(hypothetical_both.transport_enabled)
+      self.assertTrue(hypothetical_both.host_enabled)
+
+  def test_ineligible_state_blocks_hypothetical_transport(self):
+    with (
+      patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True),
+      patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", True),
+    ):
+      result = JeepLongitudinalShadow().update(-1.0, eligible=False)
+      self.assertFalse(result.transport_enabled)
+      self.assertFalse(result.host_enabled)
+
+  def test_committed_transport_gate_leaves_panda_param_off(self):
+    self.assertEqual(jeep_long_shadow_safety_param(0, 4), 0)
+    self.assertEqual(jeep_long_shadow_safety_param(2, 4), 2)
+
+  def test_hypothetical_transport_adds_only_shadow_param(self):
+    with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):
+      self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
+      self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
 
   def test_requested_accel_is_clipped(self):
     positive = JeepLongitudinalShadow().update(20.0, eligible=True)

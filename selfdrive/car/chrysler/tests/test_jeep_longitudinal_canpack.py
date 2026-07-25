@@ -1,6 +1,8 @@
+from types import SimpleNamespace
 import unittest
 
 from opendbc.can.packer import CANPacker
+from openpilot.selfdrive.car.chrysler import chryslercan
 
 
 def fca_checksum(dat):
@@ -74,12 +76,32 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
     self.assertEqual((braking[4] >> 4) & 0x7, 1)
     self.assertEqual((braking[6] >> 1) & 0x1, 0)
 
-  def test_shadow_dashboard_never_enables_wp_long(self):
-    _, _, dat, _ = self.packer.make_can_msg(
-      "WP_ACC_DASH_CMD", 0,
-      {"OP_LONG_ENABLE": 0, "COUNTER": 0, "CHECKSUM": 0},
+  def test_shadow_dashboard_tracks_independent_host_gate(self):
+    envelope = SimpleNamespace(
+      limited_accel=0.0,
+      brake_active=False,
+      engine_active=False,
+      engine_torque_nm=0.0,
+      eligible=True,
+      host_enabled=False,
     )
-    self.assertEqual(dat[3] & 0x1, 0)
+    _, disabled_dash, _ = chryslercan.create_wp_long_shadow_messages(
+      self.packer, envelope, 0,
+    )
+    self.assertEqual(disabled_dash[2][3] & 0x1, 0)
+
+    envelope.host_enabled = True
+    _, hypothetical_enabled_dash, _ = (
+      chryslercan.create_wp_long_shadow_messages(
+        self.packer, envelope, 1,
+      )
+    )
+    self.assertEqual(hypothetical_enabled_dash[2][3] & 0x1, 1)
+    self.assertEqual(hypothetical_enabled_dash[2][6] >> 4, 1)
+    self.assertEqual(
+      hypothetical_enabled_dash[2][7],
+      fca_checksum(hypothetical_enabled_dash[2]),
+    )
 
 
 if __name__ == "__main__":

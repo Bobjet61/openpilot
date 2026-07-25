@@ -120,6 +120,8 @@ class CarController(CarControllerBase):
       self.jeep_long_envelope = self.jeep_long_shadow.update(CC.actuators.accel, jeep_long_eligible)
       self.jeep_long_shadow_frames = chryslercan.create_wp_long_shadow_messages(
         self.packer, self.jeep_long_envelope, self.frame // 2)
+      if self.jeep_long_envelope.transport_enabled:
+        can_sends.extend(self.jeep_long_shadow_frames)
 
     if self.frame % 100 == 0 and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       cloudlog.info(
@@ -129,6 +131,7 @@ class CarController(CarControllerBase):
         f"brake={self.jeep_long_envelope.brake_active}, "
         f"engine={self.jeep_long_envelope.engine_active}, "
         f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
+        f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )
 

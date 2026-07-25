@@ -1,9 +1,17 @@
 from dataclasses import dataclass
 
 
-# This remains false until both Panda layers have independent message-level
-# safety policies and replay plus isolated bench validation are complete.
+# Independent host-to-Panda transport gate. This remains false in every
+# vehicle build. A future disconnected-bench-only build may change this gate
+# without enabling longitudinal actuation.
+JEEP_LONG_SHADOW_TRANSPORT_COMPILED = False
+
+# Independent actuation gate. Enabling this without transport is invalid, and
+# both Panda layers retain their own hard-off actuation gates.
 JEEP_LONG_ACTUATION_COMPILED = False
+
+if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
+  raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
 
 # Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
@@ -53,12 +61,22 @@ class JeepLongitudinalEnvelope:
   brake_active: bool
   engine_active: bool
   engine_torque_nm: float
+  transport_enabled: bool
   host_enabled: bool
   eligible: bool
 
 
 def clip(value: float, lower: float, upper: float) -> float:
   return min(max(value, lower), upper)
+
+
+def jeep_long_shadow_safety_param(
+  safety_param: int,
+  shadow_flag: int,
+) -> int:
+  if JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
+    return safety_param | shadow_flag
+  return safety_param
 
 
 class JeepLongitudinalShadow:
@@ -89,12 +107,14 @@ class JeepLongitudinalShadow:
       if engine_active else 0.0
     )
 
+    transport_enabled = JEEP_LONG_SHADOW_TRANSPORT_COMPILED and eligible
     return JeepLongitudinalEnvelope(
       requested_accel=requested_accel,
       limited_accel=limited_accel,
       brake_active=brake_active,
       engine_active=engine_active,
       engine_torque_nm=engine_torque_nm,
-      host_enabled=JEEP_LONG_ACTUATION_COMPILED and eligible,
+      transport_enabled=transport_enabled,
+      host_enabled=JEEP_LONG_ACTUATION_COMPILED and transport_enabled,
       eligible=eligible,
     )

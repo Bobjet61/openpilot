@@ -136,7 +136,7 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
     "COUNTER": counter,
   }
   dash_values = {
-    "OP_LONG_ENABLE": 0,
+    "OP_LONG_ENABLE": envelope.host_enabled,
     "COUNTER": counter,
   }
   torque_values = {
