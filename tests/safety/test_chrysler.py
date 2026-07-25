@@ -128,6 +128,309 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
     self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
 
 
+class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
+  TX_MSGS = [[0x1F6, 0], [0x1F7, 0], [0x272, 0]]
+
+  PRIVATE_BRAKE = 0x1F6
+  PRIVATE_DASH = 0x1F7
+  PRIVATE_TORQUE = 0x272
+  SOURCE_TIMEOUT_US = 100_000
+  MIN_CYCLE_INTERVAL_US = 15_000
+
+  def setUp(self):
+    self.packer = CANPackerPanda("chrysler_pacifica_2017_hybrid_generated")
+    self.safety = libpanda_py.libpanda
+    self.safety.set_safety_hooks(
+      Panda.SAFETY_CHRYSLER,
+      Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW,
+    )
+    self.safety.init_tests()
+
+  def _das_3_msg(self, counter=1, **changes):
+    values = {"COUNTER": counter}
+    values.update(changes)
+    return self.packer.make_can_msg_panda("DAS_3", 0, values)
+
+  def _speed_msg(self, speed):
+    values = {"SPEED_LEFT": speed, "SPEED_RIGHT": speed}
+    return self.packer.make_can_msg_panda("SPEED_1", 0, values)
+
+  def _user_gas_msg(self, gas):
+    values = {"Accelerator_Position": gas}
+    return self.packer.make_can_msg_panda("ECM_5", 0, values)
+
+  def _user_brake_msg(self, brake):
+    values = {"Brake_Pedal_State": 1 if brake else 0}
+    return self.packer.make_can_msg_panda("ESP_1", 0, values)
+
+  @staticmethod
+  def _fca_checksum(dat):
+    checksum = 0xFF
+    for current in dat[:-1]:
+      shift = 0x80
+      for _ in range(8):
+        bit_sum = current & shift
+        temp_checksum = checksum & 0x80
+        if bit_sum:
+          bit_sum = 0x1C
+          if temp_checksum:
+            bit_sum = 1
+          checksum = (checksum << 1) & 0xFF
+          bit_sum ^= checksum | 1
+        else:
+          if temp_checksum:
+            bit_sum = 0x1D
+          checksum = (checksum << 1) & 0xFF
+          bit_sum ^= checksum
+        checksum = bit_sum & 0xFF
+        shift >>= 1
+    return (~checksum) & 0xFF
+
+  def _private_msg(self, address, dat, corrupt_checksum=False, bus=0):
+    dat = bytearray(dat)
+    dat[7] = self._fca_checksum(dat)
+    if corrupt_checksum:
+      dat[7] ^= 1
+    return common.make_msg(bus, address, dat=bytes(dat))
+
+  def _private_brake_msg(self, counter, decel_raw=4094, command_type=0,
+                         available=True, enabled=True, stop=False, go=False,
+                         brake_prep=False, corrupt_checksum=False, bus=0):
+    dat = bytearray(8)
+    dat[0] = (int(stop) << 5) | (int(go) << 6)
+    dat[2] = (
+      ((decel_raw >> 8) & 0xF)
+      | (int(available) << 4)
+      | (int(enabled) << 5)
+    )
+    dat[3] = decel_raw & 0xFF
+    dat[4] = (command_type & 0x7) << 4
+    dat[6] = ((counter & 0xF) << 4) | (int(brake_prep) << 1)
+    return self._private_msg(
+      self.PRIVATE_BRAKE, dat, corrupt_checksum=corrupt_checksum, bus=bus,
+    )
+
+  def _private_dash_msg(self, counter, enable=False,
+                        corrupt_checksum=False, unused_byte=0, bus=0):
+    dat = bytearray(8)
+    dat[0] = unused_byte
+    dat[3] = int(enable)
+    dat[6] = (counter & 0xF) << 4
+    return self._private_msg(
+      self.PRIVATE_DASH, dat, corrupt_checksum=corrupt_checksum, bus=bus,
+    )
+
+  def _private_torque_msg(self, counter, torque_raw=2000,
+                          engine_request=False, corrupt_checksum=False,
+                          unused_byte=0):
+    dat = bytearray(8)
+    dat[0] = unused_byte
+    dat[4] = (
+      (int(engine_request) << 7)
+      | ((torque_raw >> 8) & 0x7F)
+    )
+    dat[5] = torque_raw & 0xFF
+    dat[6] = (counter & 0xF) << 4
+    return self._private_msg(
+      self.PRIVATE_TORQUE, dat, corrupt_checksum=corrupt_checksum,
+    )
+
+  def _enable_safe_source(self, counter=1):
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=1,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(1)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+
+  def _tx_private_cycle(self, counter, time_us, decel_raw=4094,
+                        command_type=0, torque_raw=2000,
+                        engine_request=False):
+    self.safety.set_timer(time_us)
+    return (
+      self._tx(self._private_brake_msg(
+        counter, decel_raw=decel_raw, command_type=command_type,
+      )),
+      self._tx(self._private_dash_msg(counter)),
+      self._tx(self._private_torque_msg(
+        counter, torque_raw=torque_raw,
+        engine_request=engine_request,
+      )),
+    )
+
+  def _reset_long_shadow(self):
+    self.safety.set_safety_hooks(
+      Panda.SAFETY_CHRYSLER,
+      Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW,
+    )
+    self.safety.init_tests()
+
+  def test_private_frames_blocked_without_shadow_param(self):
+    self.safety.set_safety_hooks(Panda.SAFETY_CHRYSLER, 0)
+    self.safety.init_tests()
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+    self.assertFalse(self._tx(self._private_dash_msg(0)))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_private_frames_require_bus_zero_and_eight_bytes(self):
+    self._enable_safe_source()
+    self.assertFalse(self._tx(self._private_brake_msg(0, bus=1)))
+    self.assertFalse(self._tx(common.make_msg(
+      0, self.PRIVATE_BRAKE, length=7,
+    )))
+
+  def test_private_valid_neutral_engine_and_brake_cycles(self):
+    self._enable_safe_source()
+    self.assertEqual(
+      self._tx_private_cycle(14, 0),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        15, 20_000, torque_raw=2400, engine_request=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 40_000, decel_raw=2661, command_type=1,
+      ),
+      (True, True, True),
+    )
+
+  def test_private_enable_is_compile_time_blocked(self):
+    self._enable_safe_source()
+    self.assertTrue(self._tx(self._private_brake_msg(0)))
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      self.assertFalse(self._tx(self._private_dash_msg(0, enable=True)))
+      self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_private_source_gates_and_freshness(self):
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.safety.set_controls_allowed(False)
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._user_gas_msg(1)))
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._user_brake_msg(True)))
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=1, ACC_DECEL_REQ=2,
+    )))
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.safety.set_timer(self.SOURCE_TIMEOUT_US + 1)
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+  def test_private_brake_payload_rejection(self):
+    invalid_messages = (
+      self._private_brake_msg(0, decel_raw=2660, command_type=1),
+      self._private_brake_msg(0, decel_raw=3276, command_type=1),
+      self._private_brake_msg(0, decel_raw=4093, command_type=0),
+      self._private_brake_msg(0, command_type=2),
+      self._private_brake_msg(0, available=False),
+      self._private_brake_msg(0, enabled=False),
+      self._private_brake_msg(0, stop=True),
+      self._private_brake_msg(0, go=True),
+      self._private_brake_msg(0, brake_prep=True),
+      self._private_brake_msg(0, corrupt_checksum=True),
+    )
+    for message in invalid_messages:
+      self._reset_long_shadow()
+      self._enable_safe_source()
+      self.assertFalse(self._tx(message))
+
+  def test_private_torque_payload_and_exclusivity(self):
+    invalid_torque = (
+      self._private_torque_msg(
+        0, torque_raw=2401, engine_request=True,
+      ),
+      self._private_torque_msg(
+        0, torque_raw=2001, engine_request=False,
+      ),
+      self._private_torque_msg(0, corrupt_checksum=True),
+      self._private_torque_msg(0, unused_byte=1),
+    )
+    for message in invalid_torque:
+      self._reset_long_shadow()
+      self._enable_safe_source()
+      self.assertTrue(self._tx(self._private_brake_msg(0)))
+      self.assertTrue(self._tx(self._private_dash_msg(0)))
+      self.assertFalse(self._tx(message))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._tx(self._private_brake_msg(
+      0, decel_raw=2661, command_type=1,
+    )))
+    self.assertTrue(self._tx(self._private_dash_msg(0)))
+    self.assertFalse(self._tx(self._private_torque_msg(
+      0, torque_raw=2100, engine_request=True,
+    )))
+
+  def test_private_dashboard_unused_payload_rejected(self):
+    self._enable_safe_source()
+    self.assertTrue(self._tx(self._private_brake_msg(0)))
+    self.assertFalse(self._tx(self._private_dash_msg(
+      0, unused_byte=1,
+    )))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_private_counter_order_checksum_and_rate(self):
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 0), (True, True, True))
+
+    self.safety.set_timer(20_000)
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 0), (True, True, True))
+    self.safety.set_timer(20_000)
+    self.assertFalse(self._tx(self._private_brake_msg(2)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 0), (True, True, True))
+    self.safety.set_timer(self.MIN_CYCLE_INTERVAL_US - 1)
+    self.assertFalse(self._tx(self._private_brake_msg(1)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertFalse(self._tx(self._private_dash_msg(0)))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+    self.assertTrue(self._tx(self._private_brake_msg(0)))
+    self.assertFalse(self._tx(self._private_dash_msg(1)))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._tx(self._private_brake_msg(0)))
+    self.assertFalse(self._tx(self._private_dash_msg(
+      0, corrupt_checksum=True,
+    )))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+
 class TestChryslerRamDTSafety(TestChryslerSafety):
   TX_MSGS = [[0xB1, 2], [0xA6, 0], [0xFA, 0]]
   RELAY_MALFUNCTION_ADDRS = {0: (0xA6,)}

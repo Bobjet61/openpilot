@@ -28,6 +28,26 @@ const SteeringLimits CHRYSLER_RAM_HD_STEERING_LIMITS = {
   .type = TorqueMotorLimited,
 };
 
+// Source-review and disconnected-bench gate. This cannot be overridden from
+// the build command. A private dashboard request with OP_LONG_ENABLE=1 is
+// therefore rejected even when the shadow safety parameter is selected.
+#ifdef CHRYSLER_JEEP_LONG_ACTUATION
+#error "CHRYSLER_JEEP_LONG_ACTUATION must remain hard-coded off"
+#endif
+#define CHRYSLER_JEEP_LONG_ACTUATION 0U
+
+#define CHRYSLER_LONG_BRAKE_ADDR 0x1F6U
+#define CHRYSLER_LONG_DASH_ADDR 0x1F7U
+#define CHRYSLER_LONG_TORQUE_ADDR 0x272U
+#define CHRYSLER_LONG_DECEL_MIN_RAW 2661
+#define CHRYSLER_LONG_DECEL_MAX_RAW 3275
+#define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094
+#define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 2400
+#define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U
+#define CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US 15000U
+#define CHRYSLER_LONG_COUNTER_RESET_US 100000U
+
 typedef struct {
   const int EPS_2;
   const int ESP_1;
@@ -93,6 +113,17 @@ const CanMsg CHRYSLER_TX_MSGS[] = {
   {CHRYSLER_ADDRS.LKAS_HEARTBIT, 0, 5},
 };
 
+const CanMsg CHRYSLER_LONG_SHADOW_TX_MSGS[] = {
+  {CHRYSLER_ADDRS.CRUISE_BUTTONS, 0, 3},
+  {CHRYSLER_ADDRS.LKAS_COMMAND, 0, 6},
+  {CHRYSLER_ADDRS.DAS_6, 0, 8},
+  {CHRYSLER_ADDRS.DAS_3, 0, 8},
+  {CHRYSLER_ADDRS.LKAS_HEARTBIT, 0, 5},
+  {CHRYSLER_LONG_BRAKE_ADDR, 0, 8},
+  {CHRYSLER_LONG_DASH_ADDR, 0, 8},
+  {CHRYSLER_LONG_TORQUE_ADDR, 0, 8},
+};
+
 const CanMsg CHRYSLER_RAM_DT_TX_MSGS[] = {
   {CHRYSLER_RAM_DT_ADDRS.CRUISE_BUTTONS, 2, 3},
   {CHRYSLER_RAM_DT_ADDRS.LKAS_COMMAND, 0, 8},
@@ -134,6 +165,7 @@ RxCheck chrysler_ram_hd_rx_checks[] = {
 
 const uint32_t CHRYSLER_PARAM_RAM_DT = 1U;  // set for Ram DT platform
 const uint32_t CHRYSLER_PARAM_RAM_HD = 2U;  // set for Ram HD platform
+const uint32_t CHRYSLER_PARAM_JEEP_LONG_SHADOW = 4U;
 
 typedef enum {
   CHRYSLER_RAM_DT,
@@ -144,6 +176,22 @@ ChryslerPlatform chrysler_platform = CHRYSLER_PACIFICA;
 const ChryslerAddrs *chrysler_addrs = &CHRYSLER_ADDRS;
 static uint8_t chrysler_das_3_last[8] = {0};
 static bool chrysler_das_3_last_valid = false;
+static bool chrysler_long_shadow_enabled = false;
+static bool chrysler_long_stock_collision = false;
+static bool chrysler_long_speed_seen = false;
+static bool chrysler_long_gas_seen = false;
+static bool chrysler_long_brake_seen = false;
+static bool chrysler_long_stock_seen = false;
+static uint32_t chrysler_long_speed_ts = 0U;
+static uint32_t chrysler_long_gas_ts = 0U;
+static uint32_t chrysler_long_brake_ts = 0U;
+static uint32_t chrysler_long_stock_ts = 0U;
+static uint8_t chrysler_long_stage = 0U;
+static uint8_t chrysler_long_cycle_counter = 0U;
+static uint8_t chrysler_long_last_counter = 0U;
+static bool chrysler_long_counter_seen = false;
+static bool chrysler_long_brake_active = false;
+static uint32_t chrysler_long_last_cycle_ts = 0U;
 
 static uint32_t chrysler_get_checksum(const CANPacket_t *to_push) {
   int checksum_byte = GET_LEN(to_push) - 1U;
@@ -187,6 +235,146 @@ static uint8_t chrysler_get_counter(const CANPacket_t *to_push) {
   return (uint8_t)(GET_BYTE(to_push, 6) >> 4);
 }
 
+static bool chrysler_long_fresh(const uint32_t now, const uint32_t last,
+                                const bool seen) {
+  return seen &&
+         (get_ts_elapsed(now, last) <= CHRYSLER_LONG_SOURCE_TIMEOUT_US);
+}
+
+static bool chrysler_long_source_safe(void) {
+  const uint32_t now = microsecond_timer_get();
+  return controls_allowed && controls_allowed_long && acc_main_on &&
+         vehicle_moving && !gas_pressed && !brake_pressed &&
+         !chrysler_long_stock_collision &&
+         chrysler_long_fresh(now, chrysler_long_speed_ts,
+                             chrysler_long_speed_seen) &&
+         chrysler_long_fresh(now, chrysler_long_gas_ts,
+                             chrysler_long_gas_seen) &&
+         chrysler_long_fresh(now, chrysler_long_brake_ts,
+                             chrysler_long_brake_seen) &&
+         chrysler_long_fresh(now, chrysler_long_stock_ts,
+                             chrysler_long_stock_seen);
+}
+
+static void chrysler_long_reset_pending(void) {
+  chrysler_long_stage = 0U;
+  chrysler_long_brake_active = false;
+}
+
+static bool chrysler_long_checksum_valid(const CANPacket_t *to_send) {
+  return (GET_LEN(to_send) == 8) &&
+         (GET_BYTE(to_send, 7) == chrysler_compute_checksum(to_send));
+}
+
+static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
+  bool allowed = chrysler_long_shadow_enabled &&
+                 (chrysler_platform == CHRYSLER_PACIFICA) &&
+                 (chrysler_long_stage == 0U) &&
+                 chrysler_long_source_safe() &&
+                 chrysler_long_checksum_valid(to_send);
+
+  const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
+  const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) |
+                        GET_BYTE(to_send, 3);
+  const int command_type = (GET_BYTE(to_send, 4) >> 4) & 0x7U;
+  const bool acc_available_cmd = GET_BIT(to_send, 20U);
+  const bool acc_enabled_cmd = GET_BIT(to_send, 21U);
+  const bool brake_fields_valid =
+    (GET_BYTE(to_send, 0) == 0U) &&
+    (GET_BYTE(to_send, 1) == 0U) &&
+    ((GET_BYTE(to_send, 2) & 0xC0U) == 0U) &&
+    ((GET_BYTE(to_send, 4) & 0x8FU) == 0U) &&
+    (GET_BYTE(to_send, 5) == 0U) &&
+    ((GET_BYTE(to_send, 6) & 0xFU) == 0U) &&
+    acc_available_cmd && acc_enabled_cmd;
+  allowed = allowed && brake_fields_valid;
+
+  if (command_type == 1) {
+    allowed = allowed &&
+              (decel_raw >= CHRYSLER_LONG_DECEL_MIN_RAW) &&
+              (decel_raw <= CHRYSLER_LONG_DECEL_MAX_RAW);
+  } else {
+    allowed = allowed && (command_type == 0) &&
+              (decel_raw == CHRYSLER_LONG_DECEL_INACTIVE_RAW);
+  }
+
+  const uint32_t now = microsecond_timer_get();
+  if (allowed && chrysler_long_counter_seen) {
+    const uint32_t elapsed =
+      get_ts_elapsed(now, chrysler_long_last_cycle_ts);
+    allowed = elapsed >= CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US;
+    if (elapsed <= CHRYSLER_LONG_COUNTER_RESET_US) {
+      allowed = allowed &&
+                (counter == ((chrysler_long_last_counter + 1U) & 0xFU));
+    }
+  }
+
+  if (allowed) {
+    chrysler_long_cycle_counter = (uint8_t)counter;
+    chrysler_long_last_counter = (uint8_t)counter;
+    chrysler_long_counter_seen = true;
+    chrysler_long_brake_active = command_type == 1;
+    chrysler_long_last_cycle_ts = now;
+    chrysler_long_stage = 1U;
+  } else {
+    chrysler_long_reset_pending();
+  }
+  return allowed;
+}
+
+static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
+  const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
+  const bool allowed =
+    chrysler_long_shadow_enabled &&
+    (chrysler_long_stage == 1U) &&
+    (counter == chrysler_long_cycle_counter) &&
+    chrysler_long_checksum_valid(to_send) &&
+    (GET_BYTE(to_send, 0) == 0U) &&
+    (GET_BYTE(to_send, 1) == 0U) &&
+    (GET_BYTE(to_send, 2) == 0U) &&
+    (GET_BYTE(to_send, 3) == CHRYSLER_JEEP_LONG_ACTUATION) &&
+    (GET_BYTE(to_send, 4) == 0U) &&
+    (GET_BYTE(to_send, 5) == 0U) &&
+    ((GET_BYTE(to_send, 6) & 0xFU) == 0U);
+
+  if (allowed) {
+    chrysler_long_stage = 2U;
+  } else {
+    chrysler_long_reset_pending();
+  }
+  return allowed;
+}
+
+static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
+  const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
+  const bool engine_request = GET_BIT(to_send, 39U);
+  const int torque_raw = ((GET_BYTE(to_send, 4) & 0x7FU) << 8) |
+                         GET_BYTE(to_send, 5);
+  bool allowed =
+    chrysler_long_shadow_enabled &&
+    (chrysler_long_stage == 2U) &&
+    (counter == chrysler_long_cycle_counter) &&
+    chrysler_long_checksum_valid(to_send) &&
+    (GET_BYTE(to_send, 0) == 0U) &&
+    (GET_BYTE(to_send, 1) == 0U) &&
+    (GET_BYTE(to_send, 2) == 0U) &&
+    (GET_BYTE(to_send, 3) == 0U) &&
+    ((GET_BYTE(to_send, 6) & 0xFU) == 0U) &&
+    !(chrysler_long_brake_active && engine_request);
+
+  if (engine_request) {
+    allowed = allowed &&
+              (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW) &&
+              (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+  } else {
+    allowed = allowed &&
+              (torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW);
+  }
+
+  chrysler_long_reset_pending();
+  return allowed;
+}
+
 static void chrysler_rx_hook(const CANPacket_t *to_push) {
   const int bus = GET_BUS(to_push);
   const int addr = GET_ADDR(to_push);
@@ -210,6 +398,11 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
 
     acc_main_on = GET_BIT(to_push, 20U) != 0U;
     mads_acc_main_check(acc_main_on);
+    chrysler_long_stock_collision =
+      ((GET_BYTE(to_push, 6) & 0x1U) != 0U) ||
+      (((GET_BYTE(to_push, 4) >> 4) & 0x7U) > 1U);
+    chrysler_long_stock_ts = microsecond_timer_get();
+    chrysler_long_stock_seen = true;
   }
 
   // TODO: use the same message for both
@@ -221,16 +414,22 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     int speed_l = (GET_BYTE(to_push, 0) << 4) + (GET_BYTE(to_push, 1) >> 4);
     int speed_r = (GET_BYTE(to_push, 2) << 4) + (GET_BYTE(to_push, 3) >> 4);
     vehicle_moving = (speed_l != 0) || (speed_r != 0);
+    chrysler_long_speed_ts = microsecond_timer_get();
+    chrysler_long_speed_seen = true;
   }
 
   // exit controls on rising edge of gas press
   if ((bus == 0) && (addr == chrysler_addrs->ECM_5)) {
     gas_pressed = GET_BYTE(to_push, 0U) != 0U;
+    chrysler_long_gas_ts = microsecond_timer_get();
+    chrysler_long_gas_seen = true;
   }
 
   // exit controls on rising edge of brake press
   if ((bus == 0) && (addr == chrysler_addrs->ESP_1)) {
     brake_pressed = ((GET_BYTE(to_push, 0U) & 0xFU) >> 2U) == 1U;
+    chrysler_long_brake_ts = microsecond_timer_get();
+    chrysler_long_brake_seen = true;
   }
 
   generic_rx_checks((bus == 0) && (addr == chrysler_addrs->LKAS_COMMAND));
@@ -270,6 +469,15 @@ static bool chrysler_tx_hook(const CANPacket_t *to_send) {
 
   if (addr == chrysler_addrs->DAS_3) {
     tx = chrysler_das_3_tx_allowed(to_send);
+  }
+  if (addr == CHRYSLER_LONG_BRAKE_ADDR) {
+    tx = chrysler_long_brake_tx_allowed(to_send);
+  }
+  if (addr == CHRYSLER_LONG_DASH_ADDR) {
+    tx = chrysler_long_dash_tx_allowed(to_send);
+  }
+  if (addr == CHRYSLER_LONG_TORQUE_ADDR) {
+    tx = chrysler_long_torque_tx_allowed(to_send);
   }
 
   // STEERING
@@ -329,6 +537,17 @@ static int chrysler_fwd_hook(int bus_num, int addr) {
 static safety_config chrysler_init(uint16_t param) {
   safety_config ret;
   chrysler_das_3_last_valid = false;
+  chrysler_long_shadow_enabled = false;
+  chrysler_long_stock_collision = false;
+  chrysler_long_speed_seen = false;
+  chrysler_long_gas_seen = false;
+  chrysler_long_brake_seen = false;
+  chrysler_long_stock_seen = false;
+  chrysler_long_counter_seen = false;
+  chrysler_long_last_counter = 0U;
+  chrysler_long_cycle_counter = 0U;
+  chrysler_long_last_cycle_ts = 0U;
+  chrysler_long_reset_pending();
 
   bool enable_ram_dt = GET_FLAG(param, CHRYSLER_PARAM_RAM_DT);
   if (enable_ram_dt) {
@@ -344,7 +563,14 @@ static safety_config chrysler_init(uint16_t param) {
   } else {
     chrysler_platform = CHRYSLER_PACIFICA;
     chrysler_addrs = &CHRYSLER_ADDRS;
-    ret = BUILD_SAFETY_CFG(chrysler_rx_checks, CHRYSLER_TX_MSGS);
+    chrysler_long_shadow_enabled =
+      GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_SHADOW);
+    if (chrysler_long_shadow_enabled) {
+      ret = BUILD_SAFETY_CFG(chrysler_rx_checks,
+                             CHRYSLER_LONG_SHADOW_TX_MSGS);
+    } else {
+      ret = BUILD_SAFETY_CFG(chrysler_rx_checks, CHRYSLER_TX_MSGS);
+    }
   }
   return ret;
 }
