@@ -44,10 +44,18 @@ Building, signing, and flashing bench firmware are separate future steps.
 
 Do not make or power a bench cable until every field below is recorded:
 
-- comma device model and serial: comma 3X / `____________`;
+- comma device model: comma 3X (confirmed by owner);
+- comma hardware serial: `____________`;
+- comma Connect dongle ID: `a8101c039f17afb0` (account/device
+  identifier only; it is not a substitute for the hardware serial);
 - comma harness-box part or revision: `____________`;
 - comma OBD-C or bench-cable part/revision: `____________`;
-- White Panda hardware revision and serial: `____________`;
+- White Panda hardware type: White Panda (`0x01`);
+- White Panda USB serial: `240028000f51363338383037`;
+- installed White Panda firmware: `v1.7.5-DEV-b11da4d3-DEBUG`;
+- installed White Panda firmware source:
+  `b11da4d31097e5d210f94f5b0fe76cb9726ef2b5`;
+- White Panda PCB/hardware revision: `____________`;
 - White Panda Chrysler adapter/harness revision: `____________`;
 - available CAN analyzer/generator and channel count: `____________`;
 - bench supply model, voltage range, current limit, and output fuse:
@@ -57,6 +65,15 @@ Do not make or power a bench cable until every field below is recorded:
   `____________`;
 - measured pin-to-pin continuity table for every proposed breakout:
   `____________`.
+
+The White Panda identity above was read directly over USB on 2026-07-25 using
+vendor control reads only. No reset, erase, unlock, safety-mode change, CAN
+transmission, or flash command was sent. A later exact Windows PnP inventory
+found the same serial in its historical device records but found no Panda or
+external CAN interface currently connected. Windows also contains a second,
+unassigned historical Panda identity,
+`4a0023000451323431333839`; do not infer that device's role without a direct
+read while it is safely isolated.
 
 Photograph both ends and labels of every harness before recording continuity.
 Do not rely on wire color, connector orientation, an Internet diagram, or the
