@@ -18,6 +18,18 @@ int main(void) {
   assert(!chrysler_long_is_fresh(1000000U, 950000U, false, 100000U));
   assert(chrysler_long_is_fresh(50U, 0xFFFFFFF0U, true, 100U));
 
+  bool counter_seen = false;
+  int counter_last = 0;
+  assert(chrysler_long_counter_step_valid(&counter_seen, &counter_last, 14));
+  assert(chrysler_long_counter_step_valid(&counter_seen, &counter_last, 15));
+  assert(chrysler_long_counter_step_valid(&counter_seen, &counter_last, 0));
+  assert(!chrysler_long_counter_step_valid(&counter_seen, &counter_last, 0));
+  assert(!chrysler_long_counter_step_valid(&counter_seen, &counter_last, 2));
+  assert(chrysler_long_counter_step_valid(&counter_seen, &counter_last, 3));
+  assert(chrysler_long_counters_aligned(true, 3, true, 3, true, 3));
+  assert(!chrysler_long_counters_aligned(true, 3, true, 2, true, 3));
+  assert(!chrysler_long_counters_aligned(true, 3, false, 3, true, 3));
+
   assert(valid_brake_command());
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_MIN_RAW,

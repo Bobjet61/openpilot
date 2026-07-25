@@ -109,13 +109,6 @@ int lkas_torq = 1024;
 int steer_type = 3;
 
 bool is_oplong_enabled = false;
-int acc_set_speed_kph = 255;
-int acc_set_speed_mph = 255;
-int cruise_state = 0;
-int cruise_icon = 0;
-int lead_dist = 255;
-int acc_text_msg = 0;
-bool acc_text_req = false;
 
 bool acc_stop = false;
 bool acc_go = false;

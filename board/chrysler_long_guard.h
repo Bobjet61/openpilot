@@ -38,6 +38,22 @@ static inline bool chrysler_long_is_fresh(const uint32_t now, const uint32_t las
   return valid && ((uint32_t)(now - last) <= timeout_us);
 }
 
+static inline bool chrysler_long_counter_step_valid(bool *seen, int *last,
+                                                     const int current) {
+  const bool valid = !*seen || (current == ((*last + 1) & 0xF));
+  *seen = true;
+  *last = current;
+  return valid;
+}
+
+static inline bool chrysler_long_counters_aligned(
+    const bool brake_seen, const int brake_counter,
+    const bool dash_seen, const int dash_counter,
+    const bool torque_seen, const int torque_counter) {
+  return brake_seen && dash_seen && torque_seen &&
+         (brake_counter == dash_counter) && (dash_counter == torque_counter);
+}
+
 static inline bool chrysler_long_commands_valid(
     const bool host_requested,
     const bool acc_available_cmd,

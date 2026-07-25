@@ -6,6 +6,15 @@ static bool chrysler_long_driver_gas = false;
 static bool chrysler_long_brake_valid = false;
 static bool chrysler_long_dash_valid = false;
 static bool chrysler_long_torque_valid = false;
+static bool chrysler_long_brake_counter_seen = false;
+static bool chrysler_long_dash_counter_seen = false;
+static bool chrysler_long_torque_counter_seen = false;
+static bool chrysler_long_brake_counter_valid = false;
+static bool chrysler_long_dash_counter_valid = false;
+static bool chrysler_long_torque_counter_valid = false;
+static bool chrysler_long_brake_checksum_valid = false;
+static bool chrysler_long_dash_checksum_valid = false;
+static bool chrysler_long_torque_checksum_valid = false;
 static bool chrysler_long_speed_valid = false;
 static bool chrysler_long_gas_pedal_valid = false;
 static bool chrysler_long_brake_pedal_valid = false;
@@ -17,6 +26,9 @@ static uint32_t chrysler_long_last_speed_ts = 0U;
 static uint32_t chrysler_long_last_gas_pedal_ts = 0U;
 static uint32_t chrysler_long_last_brake_pedal_ts = 0U;
 static uint32_t chrysler_long_last_stock_acc_ts = 0U;
+static int chrysler_long_brake_counter = 0;
+static int chrysler_long_dash_counter = 0;
+static int chrysler_long_torque_counter = 0;
 static int chrysler_long_vehicle_speed_raw = 0;
 
 static void chrysler_long_update_guard(void) {
@@ -35,7 +47,17 @@ static void chrysler_long_update_guard(void) {
     chrysler_long_is_fresh(now, chrysler_long_last_brake_pedal_ts,
                            chrysler_long_brake_pedal_valid, CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US) &&
     chrysler_long_is_fresh(now, chrysler_long_last_stock_acc_ts,
-                           chrysler_long_stock_acc_valid, CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US);
+                           chrysler_long_stock_acc_valid, CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US) &&
+    chrysler_long_brake_counter_valid &&
+    chrysler_long_dash_counter_valid &&
+    chrysler_long_torque_counter_valid &&
+    chrysler_long_brake_checksum_valid &&
+    chrysler_long_dash_checksum_valid &&
+    chrysler_long_torque_checksum_valid &&
+    chrysler_long_counters_aligned(
+      chrysler_long_brake_counter_seen, chrysler_long_brake_counter,
+      chrysler_long_dash_counter_seen, chrysler_long_dash_counter,
+      chrysler_long_torque_counter_seen, chrysler_long_torque_counter);
 
   const bool commands_valid = chrysler_long_commands_valid(
     chrysler_long_host_requested,
@@ -203,24 +225,11 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
 }
 
 static void send_acc_dash_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
+  // The private 0x1F7 carries only the host enable plus protocol integrity.
+  // Factory DAS_4 dashboard state is never replaced.
   chrysler_long_update_guard();
-
-  if (is_oplong_enabled && !org_collision_active) {
-    to_fwd->RDLR &= 0x7C000000;
-    to_fwd->RDHR &= 0x00C8C000;
-    to_fwd->RDLR |= acc_text_msg;
-    to_fwd->RDLR |= acc_set_speed_kph << 8;
-    to_fwd->RDLR |= (acc_set_speed_mph << 8) << 8;
-    to_fwd->RDLR |= (((acc_text_req << 8) << 8) << 8) << 7;
-
-    to_fwd->RDHR |= cruise_state << 4;
-    to_fwd->RDHR |= cruise_icon << 8;
-    to_fwd->RDHR |= ((lead_dist << 8) << 8) << 8;
-  }
-  else { //pass through
-    to_fwd->RDLR |= 0x00000000;
-    to_fwd->RDHR |= 0x00000000;
-  }
+  to_fwd->RDLR |= 0x00000000U;
+  to_fwd->RDHR |= 0x00000000U;
 }
 
 static void send_acc_accel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
@@ -299,39 +308,83 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
   }
 
   if ((addr == 502) && (bus_num == 0)) {
-    acc_stop = (GET_BYTE(to_push, 0) >> 5) & 0x1;
-    acc_go = (GET_BYTE(to_push, 0) >> 6) & 0x1;
-    acc_available = (GET_BYTE(to_push, 2) >> 4) & 0x1;
-    acc_enabled = (GET_BYTE(to_push, 2) >> 5) & 0x1;
-    acc_decel_cmd = ((GET_BYTE(to_push, 2) & 0xF) << 8) | GET_BYTE(to_push, 3);
-    command_type = (GET_BYTE(to_push, 4) >> 4) & 0x7;
-    acc_brk_prep = (GET_BYTE(to_push, 6) >> 1) & 0x1;
-    chrysler_long_last_brake_ts = TIM2->CNT;
-    chrysler_long_brake_valid = true;
+    const uint32_t now = TIM2->CNT;
+    if ((uint32_t)(now - chrysler_long_last_brake_ts) >
+        CHRYSLER_LONG_BRAKE_TIMEOUT_US) {
+      chrysler_long_brake_counter_seen = false;
+    }
+    const int current_counter = (GET_BYTE(to_push, 6) >> 4) & 0xF;
+    chrysler_long_brake_checksum_valid =
+      (GET_LEN(to_push) == 8) &&
+      (GET_BYTE(to_push, 7) == fca_compute_checksum(to_push));
+    chrysler_long_brake_counter_valid =
+      chrysler_long_brake_checksum_valid &&
+      chrysler_long_counter_step_valid(
+        &chrysler_long_brake_counter_seen,
+        &chrysler_long_brake_counter, current_counter);
+    chrysler_long_brake_valid =
+      chrysler_long_brake_checksum_valid && chrysler_long_brake_counter_valid;
+    if (chrysler_long_brake_valid) {
+      acc_stop = (GET_BYTE(to_push, 0) >> 5) & 0x1;
+      acc_go = (GET_BYTE(to_push, 0) >> 6) & 0x1;
+      acc_available = (GET_BYTE(to_push, 2) >> 4) & 0x1;
+      acc_enabled = (GET_BYTE(to_push, 2) >> 5) & 0x1;
+      acc_decel_cmd = ((GET_BYTE(to_push, 2) & 0xF) << 8) | GET_BYTE(to_push, 3);
+      command_type = (GET_BYTE(to_push, 4) >> 4) & 0x7;
+      acc_brk_prep = (GET_BYTE(to_push, 6) >> 1) & 0x1;
+    }
+    chrysler_long_last_brake_ts = now;
     counter_502 += 1;
     chrysler_long_update_guard();
   }
 
   if ((addr == 503) && (bus_num == 0)) {
-    chrysler_long_host_requested = GET_BYTE(to_push, 3) & 0x1;
-    acc_text_msg = GET_BYTE(to_push, 0);
-    acc_set_speed_kph = GET_BYTE(to_push, 1);
-    acc_set_speed_mph = GET_BYTE(to_push, 2);
-    cruise_state = (GET_BYTE(to_push, 4) >> 4) & 0x7;
-    cruise_icon = GET_BYTE(to_push, 5) & 0x3F;
-    lead_dist = GET_BYTE(to_push, 7);
-    acc_text_req = GET_BYTE(to_push, 3) >> 7;
-    chrysler_long_last_dash_ts = TIM2->CNT;
-    chrysler_long_dash_valid = true;
+    const uint32_t now = TIM2->CNT;
+    if ((uint32_t)(now - chrysler_long_last_dash_ts) >
+        CHRYSLER_LONG_DASH_TIMEOUT_US) {
+      chrysler_long_dash_counter_seen = false;
+    }
+    const int current_counter = (GET_BYTE(to_push, 6) >> 4) & 0xF;
+    chrysler_long_dash_checksum_valid =
+      (GET_LEN(to_push) == 8) &&
+      (GET_BYTE(to_push, 7) == fca_compute_checksum(to_push));
+    chrysler_long_dash_counter_valid =
+      chrysler_long_dash_checksum_valid &&
+      chrysler_long_counter_step_valid(
+        &chrysler_long_dash_counter_seen,
+        &chrysler_long_dash_counter, current_counter);
+    chrysler_long_dash_valid =
+      chrysler_long_dash_checksum_valid && chrysler_long_dash_counter_valid;
+    if (chrysler_long_dash_valid) {
+      chrysler_long_host_requested = GET_BYTE(to_push, 3) & 0x1;
+    }
+    chrysler_long_last_dash_ts = now;
     chrysler_long_update_guard();
   }
 
   if ((addr == 626) && (bus_num == 0)) {
-    engine_torque_request_max = (GET_BYTE(to_push, 4) >> 7) & 0x1;
-    engine_torque_raw = (GET_BYTE(to_push, 4) & 0x7F) << 8 |
-                        GET_BYTE(to_push, 5);
-    chrysler_long_last_torque_ts = TIM2->CNT;
-    chrysler_long_torque_valid = true;
+    const uint32_t now = TIM2->CNT;
+    if ((uint32_t)(now - chrysler_long_last_torque_ts) >
+        CHRYSLER_LONG_TORQUE_TIMEOUT_US) {
+      chrysler_long_torque_counter_seen = false;
+    }
+    const int current_counter = (GET_BYTE(to_push, 6) >> 4) & 0xF;
+    chrysler_long_torque_checksum_valid =
+      (GET_LEN(to_push) == 8) &&
+      (GET_BYTE(to_push, 7) == fca_compute_checksum(to_push));
+    chrysler_long_torque_counter_valid =
+      chrysler_long_torque_checksum_valid &&
+      chrysler_long_counter_step_valid(
+        &chrysler_long_torque_counter_seen,
+        &chrysler_long_torque_counter, current_counter);
+    chrysler_long_torque_valid =
+      chrysler_long_torque_checksum_valid && chrysler_long_torque_counter_valid;
+    if (chrysler_long_torque_valid) {
+      engine_torque_request_max = (GET_BYTE(to_push, 4) >> 7) & 0x1;
+      engine_torque_raw = (GET_BYTE(to_push, 4) & 0x7F) << 8 |
+                          GET_BYTE(to_push, 5);
+    }
+    chrysler_long_last_torque_ts = now;
     chrysler_long_update_guard();
   }
 
