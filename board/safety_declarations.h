@@ -125,8 +125,8 @@ bool acc_enabled = false;
 bool acc_brk_prep = false;
 int command_type = 0;
 
-bool acc_eng_req = 0;
-int acc_torq = 7767;
+bool engine_torque_request_max = false;
+int engine_torque_raw = 2000;
 
 bool org_acc_available = false;
 int org_cmd_type = 0;

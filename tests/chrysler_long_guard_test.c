@@ -5,7 +5,7 @@
 
 static bool valid_brake_command(void) {
   return chrysler_long_commands_valid(
-    true, true, true, false, false, 2866, 1, true, false,
+    true, true, true, false, false, 2866, 1, false, false,
     CHRYSLER_LONG_TORQUE_ZERO_RAW, 100, false, false, false);
 }
 
@@ -20,33 +20,50 @@ int main(void) {
 
   assert(valid_brake_command());
   assert(chrysler_long_commands_valid(
-    true, true, true, false, false, 4094, 0, false, true,
-    7845, 5000, false, false, false));
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_MIN_RAW,
+    1, false, false, CHRYSLER_LONG_TORQUE_ZERO_RAW,
+    100, false, false, false));
+  assert(chrysler_long_commands_valid(
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
+    0, false, true,
+    2310, 100, false, false, false));
 
   assert(!chrysler_long_commands_valid(
-    false, true, true, false, false, 2866, 1, true, false,
-    7767, 100, false, false, false));
+    false, true, true, false, false, 2866, 1, false, false,
+    2000, 100, false, false, false));
   assert(!chrysler_long_commands_valid(
-    true, true, true, false, false, 2500, 1, true, false,
-    7767, 100, false, false, false));
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_MIN_RAW - 1,
+    1, false, false,
+    2000, 100, false, false, false));
+  assert(!chrysler_long_commands_valid(
+    true, true, true, false, false, 2866, 1, true, false,
+    2000, 100, false, false, false));
+  assert(!chrysler_long_commands_valid(
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
+    0, false, true,
+    2500, 100, false, false, false));
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, 2866, 1, false, false,
-    7767, 100, false, false, false));
+    2000, 100, true, false, false));
   assert(!chrysler_long_commands_valid(
-    true, true, true, false, false, 4094, 0, false, true,
-    8000, 5000, false, false, false));
+    true, true, true, false, false, 2866, 1, false, false,
+    2000, 100, false, true, false));
   assert(!chrysler_long_commands_valid(
-    true, true, true, false, false, 2866, 1, true, false,
-    7767, 100, true, false, false));
+    true, true, true, false, false, 2866, 1, false, false,
+    2000, 100, false, false, true));
   assert(!chrysler_long_commands_valid(
-    true, true, true, false, false, 2866, 1, true, false,
-    7767, 100, false, true, false));
+    true, true, true, true, false, 2866, 1, false, false,
+    2000, 100, false, false, false));
   assert(!chrysler_long_commands_valid(
-    true, true, true, false, false, 2866, 1, true, false,
-    7767, 100, false, false, true));
+    true, true, true, false, false, 2866, 1, false, false,
+    2000, 10, false, false, false));
   assert(!chrysler_long_commands_valid(
-    true, true, true, true, false, 2866, 1, true, false,
-    7767, 300, false, false, false));
+    true, true, true, false, false, 3200, 0, false, false,
+    2000, 100, false, false, false));
+  assert(!chrysler_long_commands_valid(
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
+    0, false, false,
+    2100, 100, false, false, false));
 
   return 0;
 }

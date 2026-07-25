@@ -46,8 +46,8 @@ static void chrysler_long_update_guard(void) {
     acc_decel_cmd,
     command_type,
     acc_brk_prep,
-    acc_eng_req,
-    acc_torq,
+    engine_torque_request_max,
+    engine_torque_raw,
     chrysler_long_vehicle_speed_raw,
     chrysler_long_driver_brake,
     chrysler_long_driver_gas,
@@ -173,21 +173,28 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   chrysler_long_update_guard();
 
   if (is_oplong_enabled && !org_collision_active) {
-    to_fwd->RDLR &= 0x00000000;
-    to_fwd->RDHR &= 0x00FD0080; // keep the counter
+    // Preserve the two stock DAS_3 byte-2 bits that are outside the private
+    // protocol. Replace propulsion and braking in this one diesel DAS_3 frame.
+    to_fwd->RDLR &= 0x00C00000U;
+    to_fwd->RDLR |= (uint32_t)((engine_torque_raw >> 8) & 0x1F);
+    to_fwd->RDLR |= (uint32_t)(engine_torque_raw & 0xFF) << 8;
+    to_fwd->RDLR |= (uint32_t)engine_torque_request_max << 7;
 
-    to_fwd->RDLR |= acc_stop << 5;
-    to_fwd->RDLR |= acc_go << 6;
-    to_fwd->RDLR |= ((acc_decel_cmd >> 8) << 8) << 8;
-    to_fwd->RDLR |= ((acc_available << 8) << 8) << 4;
-    to_fwd->RDLR |= ((acc_enabled << 8) << 8) << 5;
-    to_fwd->RDLR |= ((acc_decel_cmd << 8) << 8) << 8;
+    to_fwd->RDLR |= (uint32_t)acc_stop << 5;
+    to_fwd->RDLR |= (uint32_t)acc_go << 6;
+    to_fwd->RDLR |= (uint32_t)((acc_decel_cmd >> 8) & 0xF) << 16;
+    to_fwd->RDLR |= (uint32_t)acc_available << 20;
+    to_fwd->RDLR |= (uint32_t)acc_enabled << 21;
+    to_fwd->RDLR |= (uint32_t)(acc_decel_cmd & 0xFF) << 24;
 
-    to_fwd->RDHR |= command_type << 4;
-    to_fwd->RDHR |= ((acc_brk_prep << 8) << 8) << 1;
+    // Preserve stock fault, collision, counter, and unrelated bits.
+    to_fwd->RDHR &= ~((uint32_t)0x70U | ((uint32_t)1U << 17));
+    to_fwd->RDHR |= (uint32_t)command_type << 4;
+    to_fwd->RDHR |= (uint32_t)acc_brk_prep << 17;
 
+    to_fwd->RDHR &= 0x00FFFFFFU;
     crc = fca_compute_checksum(to_fwd);
-    to_fwd->RDHR |= (((crc << 8) << 8) << 8);   //replace Checksum
+    to_fwd->RDHR |= (uint32_t)crc << 24;
   }
   else { //pass through
     to_fwd->RDLR |= 0x00000000;
@@ -217,20 +224,11 @@ static void send_acc_dash_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
 }
 
 static void send_acc_accel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
-  int crc;
+  // This EcoDiesel did not use DAS_5 wheel torque in 130.2 minutes of stock
+  // ACC logs. Propulsion belongs in DAS_3, so always pass DAS_5 through.
   chrysler_long_update_guard();
-
-  if (is_oplong_enabled && !org_collision_active) {
-    to_fwd->RDHR &= 0x00FF0000; // keep the counter
-    to_fwd->RDHR |= (acc_eng_req << 7);
-    to_fwd->RDHR |= (acc_torq >> 8) | ((acc_torq << 8) & 0xFFFF);
-    crc = fca_compute_checksum(to_fwd);
-    to_fwd->RDHR |= (((crc << 8) << 8) << 8);   //replace Checksum
-  }
-  else { //pass through
-    to_fwd->RDLR |= 0x00000000;
-    to_fwd->RDHR |= 0x00000000;
-  }
+  to_fwd->RDLR |= 0x00000000U;
+  to_fwd->RDHR |= 0x00000000U;
 }
 
 static void send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
@@ -266,12 +264,18 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     counter_658 += 1;
   }
 
-  if ((addr == 284) && (bus_num == 0)) {
-    chrysler_long_vehicle_speed_raw = (GET_BYTE(to_push, 4) << 8) | GET_BYTE(to_push, 5);
+  if ((addr == 514) && (bus_num == 0)) {
+    const int speed_left_raw = (GET_BYTE(to_push, 0) << 4) |
+                               (GET_BYTE(to_push, 1) >> 4);
+    const int speed_right_raw = (GET_BYTE(to_push, 2) << 4) |
+                                (GET_BYTE(to_push, 3) >> 4);
+    chrysler_long_vehicle_speed_raw = (speed_left_raw + speed_right_raw) / 2;
     chrysler_long_last_speed_ts = TIM2->CNT;
     chrysler_long_speed_valid = true;
     chrysler_long_update_guard();
+  }
 
+  if ((addr == 284) && (bus_num == 0)) {
     if (counter_502 > 0) {
         counter_284_502 += 1;
         if (counter_284_502 - counter_502 > 25) {
@@ -323,15 +327,16 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
   }
 
   if ((addr == 626) && (bus_num == 0)) {
-    acc_eng_req = (GET_BYTE(to_push, 4) >> 7) & 0x1;
-    acc_torq = (GET_BYTE(to_push, 4) & 0x7F) << 8 | GET_BYTE(to_push, 5);
+    engine_torque_request_max = (GET_BYTE(to_push, 4) >> 7) & 0x1;
+    engine_torque_raw = (GET_BYTE(to_push, 4) & 0x7F) << 8 |
+                        GET_BYTE(to_push, 5);
     chrysler_long_last_torque_ts = TIM2->CNT;
     chrysler_long_torque_valid = true;
     chrysler_long_update_guard();
   }
 
-  if ((addr == 308) && (bus_num == 0)) {
-    chrysler_long_driver_gas = (GET_BYTE(to_push, 5) & 0x7F) != 0;
+  if ((addr == 559) && (bus_num == 0)) {
+    chrysler_long_driver_gas = GET_BYTE(to_push, 0) != 0;
     chrysler_long_last_gas_pedal_ts = TIM2->CNT;
     chrysler_long_gas_pedal_valid = true;
     chrysler_long_update_guard();

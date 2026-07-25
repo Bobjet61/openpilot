@@ -20,17 +20,18 @@
 #define CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US 100000U
 
 // ACC_DECEL_CMD: raw * 0.004885 - 16 m/s^2.
-#define CHRYSLER_LONG_DECEL_MIN_RAW 2559  // approximately -3.5 m/s^2
-#define CHRYSLER_LONG_DECEL_ZERO_RAW 3275
+#define CHRYSLER_LONG_DECEL_MIN_RAW 2661  // -3.001015 m/s^2, stock p01
+#define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
+#define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094   // stock no-brake sentinel
 
-// ACC_TORQ: raw - 7767 Nm. The shadow host caps acceleration at 1 m/s^2
-// and estimates less than 80 Nm for this non-hybrid Jeep. Keep 100 Nm as
-// the provisional absolute ceiling pending logged calibration.
-#define CHRYSLER_LONG_TORQUE_ZERO_RAW 7767
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 7867
+// Private engine-torque command uses the stock DAS_3 scaling:
+// raw * 0.25 - 500 Nm. The calibrated shadow ceiling is 100 Nm.
+#define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 2400
 
-// Stop/go state is only valid near standstill. ESP_8 speed is 1/128 km/h.
-#define CHRYSLER_LONG_STOP_SPEED_MAX_RAW 206  // approximately 1 mph
+// SPEED_1 raw * 0.071028 m/s. The initial scope is moving-only and excludes
+// standstill, stop, go, brake preparation, and hold behavior.
+#define CHRYSLER_LONG_MOVING_SPEED_MIN_RAW 29  // approximately 2.06 m/s
 
 static inline bool chrysler_long_is_fresh(const uint32_t now, const uint32_t last,
                                           const bool valid, const uint32_t timeout_us) {
@@ -55,25 +56,23 @@ static inline bool chrysler_long_commands_valid(
   bool valid = host_requested && acc_available_cmd && acc_enabled_cmd &&
                !driver_brake && !driver_gas && !stock_collision;
 
-  valid = valid && !(acc_stop_cmd && acc_go_cmd);
+  valid = valid && !acc_stop_cmd && !acc_go_cmd;
+  valid = valid && (speed_raw >= CHRYSLER_LONG_MOVING_SPEED_MIN_RAW);
   valid = valid && (command_type_cmd >= 0) && (command_type_cmd <= 1);
-
-  if (acc_stop_cmd || acc_go_cmd) {
-    valid = valid && (speed_raw <= CHRYSLER_LONG_STOP_SPEED_MAX_RAW);
-  }
 
   if (command_type_cmd == 1) {
     valid = valid && !engine_request_cmd;
-    valid = valid && brake_prep_cmd;
+    valid = valid && !brake_prep_cmd;
     valid = valid && (decel_raw >= CHRYSLER_LONG_DECEL_MIN_RAW);
-    valid = valid && (decel_raw <= CHRYSLER_LONG_DECEL_ZERO_RAW);
-    valid = valid && !acc_go_cmd;
+    valid = valid && (decel_raw <= CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW);
   } else {
     valid = valid && !brake_prep_cmd;
-    valid = valid && !acc_stop_cmd;
+    valid = valid && (decel_raw == CHRYSLER_LONG_DECEL_INACTIVE_RAW);
     if (engine_request_cmd) {
       valid = valid && (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW);
       valid = valid && (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+    } else {
+      valid = valid && (torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW);
     }
   }
 
