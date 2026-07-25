@@ -109,6 +109,40 @@ def das_3_command(packer, counter_offset, go, torque_req, torque, max_gear, stop
   return packer.make_can_msg("DAS_3", 0, values)
 
 
+def create_wp_long_shadow_messages(packer, envelope, counter):
+  """Pack recovered White Panda commands with OP longitudinal held disabled."""
+  counter %= 0x10
+  brake_values = {
+    "ACC_STOP": 0,
+    "ACC_GO": 0,
+    "ACC_DECEL_CMD": envelope.limited_accel,
+    "ACC_AVAILABLE": envelope.eligible,
+    "ACC_ENABLED": envelope.eligible,
+    "ACC_BRK_PREP": envelope.brake_active,
+    "COMMAND_TYPE": 1 if envelope.brake_active else 0,
+    "COUNTER": counter,
+  }
+  dash_values = {
+    "ACC_DISP_MSG": 0,
+    "ACC_SET_SPEED_KPH": 0,
+    "ACC_SET_SPEED_MPH": 0,
+    "OP_LONG_ENABLE": 0,
+    "CRUISE_STATE": 0,
+    "CRUISE_ICON": 0,
+    "LEAD_DIST": 255,
+  }
+  torque_values = {
+    "ACC_ENG_REQ": envelope.engine_active,
+    "ACC_TORQ": envelope.engine_torque_nm,
+    "COUNTER": counter,
+  }
+  return [
+    packer.make_can_msg("WP_ACC_BRAKE_CMD", 0, brake_values),
+    packer.make_can_msg("WP_ACC_DASH_CMD", 0, dash_values),
+    packer.make_can_msg("WP_ACC_TORQUE_CMD", 0, torque_values),
+  ]
+
+
 def create_lkas_heartbit(packer, lkas_disabled, lkas_heartbit):
   # LKAS_HEARTBIT (697) LKAS heartbeat
   values = lkas_heartbit.copy()  # forward what we parsed

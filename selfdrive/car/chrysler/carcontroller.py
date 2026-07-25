@@ -6,6 +6,7 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JeepLongitudinalShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
 from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
@@ -31,6 +32,9 @@ class CarController(CarControllerBase):
     self.bh_hold_decel = -2.0
     self.last_das_3_counter = -1
     self.bh_last_resume_frame = -100
+    self.jeep_long_shadow = JeepLongitudinalShadow()
+    self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
+    self.jeep_long_shadow_frames = []
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -101,6 +105,32 @@ class CarController(CarControllerBase):
       self.slc_active_stock = slc_active
 
     lkas_active = CC.latActive and CS.madsEnabled
+    jeep_long_eligible = (
+      self.CP.carFingerprint in BRAKE_HOLD_CARS and
+      bool(self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20) and
+      CC.enabled and
+      CS.out.gearShifter in FORWARD_GEARS and
+      CS.out.cruiseState.available and
+      not CS.out.accFaulted and
+      not CS.out.brakePressed and
+      not CS.out.gasPressed and
+      not CS.out.stockAeb
+    )
+    if self.frame % 2 == 0:
+      self.jeep_long_envelope = self.jeep_long_shadow.update(CC.actuators.accel, jeep_long_eligible)
+      self.jeep_long_shadow_frames = chryslercan.create_wp_long_shadow_messages(
+        self.packer, self.jeep_long_envelope, self.frame // 2)
+
+    if self.frame % 100 == 0 and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
+      cloudlog.info(
+        f"Jeep long shadow: eligible={self.jeep_long_envelope.eligible}, "
+        f"requested={self.jeep_long_envelope.requested_accel:.3f}, "
+        f"limited={self.jeep_long_envelope.limited_accel:.3f}, "
+        f"brake={self.jeep_long_envelope.brake_active}, "
+        f"engine={self.jeep_long_envelope.engine_active}, "
+        f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
+        f"host_enabled={self.jeep_long_envelope.host_enabled}"
+      )
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
       can_sends.append(chryslercan.create_lkas_heartbit(self.packer, CS.lkas_disabled, CS.lkas_heartbit))

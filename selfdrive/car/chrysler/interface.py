@@ -2,6 +2,7 @@
 from cereal import car
 from panda import Panda
 from openpilot.selfdrive.car import create_button_events, get_safety_config, create_mads_event
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JEEP_LONG_ACTUATION_COMPILED
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_HD, RAM_DT, RAM_CARS, ChryslerFlags, ChryslerFlagsSP, BUTTON_STATES
 from openpilot.selfdrive.car.interfaces import CarInterfaceBase
 
@@ -51,6 +52,10 @@ class CarInterface(CarInterfaceBase):
     # Jeep
     elif candidate in (CAR.JEEP_GRAND_CHEROKEE, CAR.JEEP_GRAND_CHEROKEE_2019):
       ret.steerActuatorDelay = 0.2
+      # Experimental longitudinal stays unavailable while this branch only
+      # packs and logs shadow commands.
+      ret.experimentalLongitudinalAvailable = JEEP_LONG_ACTUATION_COMPILED
+      ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED
 
       ret.lateralTuning.init('pid')
       # Preserve the existing tune through 20 m/s, then mildly soften the
