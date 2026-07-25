@@ -1,11 +1,13 @@
 from dataclasses import dataclass
 
 
-# This remains false until the exact installed White Panda firmware is
-# identified and both Panda layers have message-level safety tests.
+# This remains false until both Panda layers have independent message-level
+# safety policies and replay plus isolated bench validation are complete.
 JEEP_LONG_ACTUATION_COMPILED = False
 
-ACCEL_MIN = -3.5
+# Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
+# -3.001015 m/s^2. Keep the shadow envelope just inside that value.
+ACCEL_MIN = -3.0
 ACCEL_MAX = 1.0
 ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
@@ -16,6 +18,7 @@ JERK_DOWN = 2.0
 # calibration only; it is not transmitted by this branch.
 VEHICLE_MASS_SCALE_KG = 1200.0
 NON_HYBRID_GEAR_RATIO = 15.5
+ENGINE_TORQUE_MAX_NM = 100.0
 
 
 @dataclass(frozen=True)
@@ -52,7 +55,11 @@ class JeepLongitudinalShadow:
     self.accel_last = limited_accel
     brake_active = eligible and limited_accel < -ACCEL_DEADBAND
     engine_active = eligible and limited_accel > ACCEL_DEADBAND
-    engine_torque_nm = max(0.0, limited_accel) * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO
+    engine_torque_nm = clip(
+      max(0.0, limited_accel) * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO,
+      0.0,
+      ENGINE_TORQUE_MAX_NM,
+    )
 
     return JeepLongitudinalEnvelope(
       requested_accel=requested_accel,

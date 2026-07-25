@@ -110,15 +110,19 @@ def das_3_command(packer, counter_offset, go, torque_req, torque, max_gear, stop
 
 
 def create_wp_long_shadow_messages(packer, envelope, counter):
-  """Pack recovered White Panda commands with OP longitudinal held disabled."""
+  """Pack calibrated Jeep White Panda commands with OP longitudinal disabled."""
   counter %= 0x10
   brake_values = {
     "ACC_STOP": 0,
     "ACC_GO": 0,
-    "ACC_DECEL_CMD": envelope.limited_accel,
+    # Stock DAS_3 uses its +4.0 m/s^2 encoded maximum as the inactive
+    # deceleration sentinel whenever ACC_DECEL_REQ is zero.
+    "ACC_DECEL_CMD": envelope.limited_accel if envelope.brake_active else 4.0,
     "ACC_AVAILABLE": envelope.eligible,
     "ACC_ENABLED": envelope.eligible,
-    "ACC_BRK_PREP": envelope.brake_active,
+    # Stock logs show brake-prep is not a normal-braking enable bit. The
+    # initial moving-only shadow excludes brake-prep and stop/go completely.
+    "ACC_BRK_PREP": 0,
     "COMMAND_TYPE": 1 if envelope.brake_active else 0,
     "COUNTER": counter,
   }
@@ -132,8 +136,8 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
     "LEAD_DIST": 255,
   }
   torque_values = {
-    "ACC_ENG_REQ": envelope.engine_active,
-    "ACC_TORQ": envelope.engine_torque_nm,
+    "ENGINE_TORQUE_REQUEST_MAX": envelope.engine_active,
+    "ENGINE_TORQUE_REQUEST": envelope.engine_torque_nm,
     "COUNTER": counter,
   }
   return [

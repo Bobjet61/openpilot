@@ -1,11 +1,12 @@
 # Jeep longitudinal shadow branch
 
-This branch recovers and packs the Chrysler Advanced White Panda command
-protocol for offline/shadow validation:
+This branch packs a calibrated Chrysler Advanced White Panda command protocol
+for offline/shadow validation:
 
 - `0x1F6` brake/deceleration command;
 - `0x1F7` dashboard state and White Panda longitudinal enable bit;
-- `0x272` engine-torque command.
+- `0x272` private engine-torque command, mapped by the White Panda onto the
+  Jeep's stock `0x1F4` DAS_3 engine-torque fields.
 
 The frames are packed in memory and logged but never appended to `can_sends`.
 The `OP_LONG_ENABLE` bit is always zero.
@@ -13,8 +14,8 @@ The `OP_LONG_ENABLE` bit is always zero.
 `openpilotLongitudinalControl` and `experimentalLongitudinalAvailable` remain
 false.
 
-Before actuation can be considered, the exact installed White Panda firmware
-must be identified and the following must be implemented and replay-tested:
+Before actuation can be considered, the following must be implemented and
+replay-tested:
 
 - strict host-frame allowlists, frequency checks, bounds, and counters in the
   comma 3X Panda safety model;
@@ -26,3 +27,17 @@ must be identified and the following must be implemented and replay-tested:
 
 The prior XPS patch is not a safety baseline: it relaxed steering error limits
 and disabled receive checks.
+
+## Stock-log calibration
+
+Passive analysis of 131 rlogs (130.2 minutes) found:
+
+- propulsion uses DAS_3 `ENGINE_TORQUE_REQUEST`; no active DAS_5 wheel-torque
+  request was observed while stock ACC was active;
+- driver accelerator is `0x22F` ECM_5, not the provisional `0x134` signal;
+- speed is sourced from `0x202` SPEED_1;
+- brake-prep was asserted on only 12.3% of normal braking-request frames.
+
+The hard-off shadow is therefore limited to moving-only braking from -3.0 to
+0.0 m/s^2 and DAS_3 engine torque from 0 to 100 Nm. Stop/go, standstill hold,
+and brake-prep are excluded pending separate validation.
