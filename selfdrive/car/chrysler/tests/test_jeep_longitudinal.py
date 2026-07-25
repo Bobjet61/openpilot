@@ -5,6 +5,8 @@ import unittest
 from unittest.mock import patch
 
 LONG_PATH = Path(__file__).resolve().parents[1] / "jeep_longitudinal.py"
+CARCONTROLLER_PATH = Path(__file__).resolve().parents[1] / "carcontroller.py"
+INTERFACE_PATH = Path(__file__).resolve().parents[1] / "interface.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
 assert LONG_SPEC is not None and LONG_SPEC.loader is not None
 LONG = importlib.util.module_from_spec(LONG_SPEC)
@@ -27,6 +29,30 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
     self.assertFalse(result.transport_enabled)
     self.assertFalse(result.host_enabled)
+
+  def test_committed_vehicle_path_keeps_shadow_frames_and_longitudinal_off(self):
+    carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
+    guarded_append = (
+      "if self.jeep_long_envelope.transport_enabled:\n"
+      "        can_sends.extend(self.jeep_long_shadow_frames)"
+    )
+    self.assertIn(guarded_append, carcontroller_source)
+    self.assertEqual(
+      carcontroller_source.count(
+        "can_sends.extend(self.jeep_long_shadow_frames)",
+      ),
+      1,
+    )
+
+    interface_source = INTERFACE_PATH.read_text(encoding="utf-8")
+    self.assertIn(
+      "ret.experimentalLongitudinalAvailable = JEEP_LONG_ACTUATION_COMPILED",
+      interface_source,
+    )
+    self.assertIn(
+      "ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED",
+      interface_source,
+    )
 
   def test_transport_and_actuation_are_independent_fail_closed_gates(self):
     with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):
