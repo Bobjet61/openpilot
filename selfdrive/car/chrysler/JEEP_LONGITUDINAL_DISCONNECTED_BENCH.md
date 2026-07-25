@@ -57,7 +57,7 @@ Do not make or power a bench cable until every field below is recorded:
   `b11da4d31097e5d210f94f5b0fe76cb9726ef2b5`;
 - White Panda PCB/hardware revision: `____________`;
 - White Panda Chrysler adapter/harness revision: `____________`;
-- available CAN analyzer/generator and channel count: `____________`;
+- available CAN analyzer/generator and channel count: none currently owned;
 - bench supply model, voltage range, current limit, and output fuse:
   `____________`;
 - emergency-disconnect hardware: `____________`;
@@ -74,6 +74,12 @@ external CAN interface currently connected. Windows also contains a second,
 unassigned historical Panda identity,
 `4a0023000451323431333839`; do not infer that device's role without a direct
 read while it is safely isolated.
+
+The owner reports that the comma 3X, White Panda, Chrysler Advanced adapter,
+and associated vehicle harnesses have been installed and operating for nearly
+three years. Treat this as the known-good baseline for the existing lateral
+installation. It does not validate the proposed longitudinal message path,
+which has not been part of that operating history.
 
 Photograph both ends and labels of every harness before recording continuity.
 Do not rely on wire color, connector orientation, an Internet diagram, or the
