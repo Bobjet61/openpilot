@@ -41,3 +41,16 @@ Passive analysis of 131 rlogs (130.2 minutes) found:
 The hard-off shadow is therefore limited to moving-only braking from -3.0 to
 0.0 m/s^2 and DAS_3 engine torque from 0 to 100 Nm. Stop/go, standstill hold,
 and brake-prep are excluded pending separate validation.
+
+All three private frames carry the same rolling four-bit counter and an FCA
+checksum. The private dashboard frame contains only the hard-off request bit,
+counter, and checksum; the factory DAS_4 dashboard frame is passed through
+unchanged.
+
+The offline replay opened 131 downloaded rlogs. All 284,095 eligible shadow
+cycles passed the envelope, and every one of 5,619 samples per injected fault
+class was rejected. The short end-of-drive segment has 51,085 readable events
+followed by a corrupt/truncated final event; its readable portion was replayed
+and the tail is a non-blocking data caveat. The comma 3X Panda still lacks an
+independent matching transmit safety policy, so the branch remains hard-off
+and is not bench-ready.

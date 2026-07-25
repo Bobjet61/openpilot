@@ -14,6 +14,7 @@ ACCEL_MAX = LONG.ACCEL_MAX
 ACCEL_MIN = LONG.ACCEL_MIN
 JEEP_LONG_ACTUATION_COMPILED = LONG.JEEP_LONG_ACTUATION_COMPILED
 JeepLongitudinalShadow = LONG.JeepLongitudinalShadow
+fca_checksum = LONG.fca_checksum
 
 
 class TestJeepLongitudinalShadow(unittest.TestCase):
@@ -54,6 +55,19 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(engine.brake_active)
     self.assertTrue(engine.engine_active)
     self.assertGreater(engine.engine_torque_nm, 0.0)
+
+  def test_engine_torque_is_zero_inside_deadband(self):
+    result = JeepLongitudinalShadow().update(0.04, eligible=True)
+    self.assertFalse(result.engine_active)
+    self.assertEqual(result.engine_torque_nm, 0.0)
+
+  def test_fca_checksum_ignores_only_final_byte(self):
+    payload = bytearray.fromhex("1020304050607000")
+    checksum = fca_checksum(payload)
+    payload[-1] = checksum
+    self.assertEqual(fca_checksum(payload), checksum)
+    payload[1] ^= 1
+    self.assertNotEqual(fca_checksum(payload), checksum)
 
 
 if __name__ == "__main__":

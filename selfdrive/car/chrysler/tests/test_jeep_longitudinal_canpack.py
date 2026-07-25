@@ -3,16 +3,50 @@ import unittest
 from opendbc.can.packer import CANPacker
 
 
+def fca_checksum(dat):
+  checksum = 0xFF
+  for current in dat[:-1]:
+    shift = 0x80
+    for _ in range(8):
+      bit_sum = current & shift
+      temp_checksum = checksum & 0x80
+      if bit_sum:
+        bit_sum = 0x1C
+        if temp_checksum:
+          bit_sum = 1
+        checksum = (checksum << 1) & 0xFF
+        bit_sum ^= checksum | 1
+      else:
+        if temp_checksum:
+          bit_sum = 0x1D
+        checksum = (checksum << 1) & 0xFF
+        bit_sum ^= checksum
+      checksum = bit_sum & 0xFF
+      shift >>= 1
+  return (~checksum) & 0xFF
+
+
 class TestJeepLongitudinalCanPacking(unittest.TestCase):
   def setUp(self):
     self.packer = CANPacker("chrysler_pacifica_2017_hybrid_generated")
 
   def test_private_white_panda_addresses(self):
-    brake = self.packer.make_can_msg("WP_ACC_BRAKE_CMD", 0, {"ACC_DECEL_CMD": -1.0})
-    dash = self.packer.make_can_msg("WP_ACC_DASH_CMD", 0, {"OP_LONG_ENABLE": 0})
-    torque = self.packer.make_can_msg("WP_ACC_TORQUE_CMD", 0, {"ENGINE_TORQUE_REQUEST": 0})
+    brake = self.packer.make_can_msg(
+      "WP_ACC_BRAKE_CMD", 0,
+      {"ACC_DECEL_CMD": -1.0, "COUNTER": 9, "CHECKSUM": 0},
+    )
+    dash = self.packer.make_can_msg(
+      "WP_ACC_DASH_CMD", 0,
+      {"OP_LONG_ENABLE": 0, "COUNTER": 9, "CHECKSUM": 0},
+    )
+    torque = self.packer.make_can_msg(
+      "WP_ACC_TORQUE_CMD", 0,
+      {"ENGINE_TORQUE_REQUEST": 0, "COUNTER": 9, "CHECKSUM": 0},
+    )
     self.assertEqual((brake[0], dash[0], torque[0]), (0x1F6, 0x1F7, 0x272))
     self.assertEqual((len(brake[2]), len(dash[2]), len(torque[2])), (8, 8, 8))
+    self.assertEqual(tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)), (9, 9, 9))
+    self.assertTrue(all(msg[2][7] == fca_checksum(msg[2]) for msg in (brake, dash, torque)))
 
   def test_private_engine_torque_uses_das3_scaling(self):
     _, _, dat, _ = self.packer.make_can_msg(
@@ -41,7 +75,10 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
     self.assertEqual((braking[6] >> 1) & 0x1, 0)
 
   def test_shadow_dashboard_never_enables_wp_long(self):
-    _, _, dat, _ = self.packer.make_can_msg("WP_ACC_DASH_CMD", 0, {"OP_LONG_ENABLE": 0})
+    _, _, dat, _ = self.packer.make_can_msg(
+      "WP_ACC_DASH_CMD", 0,
+      {"OP_LONG_ENABLE": 0, "COUNTER": 0, "CHECKSUM": 0},
+    )
     self.assertEqual(dat[3] & 0x1, 0)
 
 

@@ -21,6 +21,31 @@ NON_HYBRID_GEAR_RATIO = 15.5
 ENGINE_TORQUE_MAX_NM = 100.0
 
 
+def fca_checksum(dat: bytes) -> int:
+  """FCA CRC over every payload byte except the final checksum byte."""
+  checksum = 0xFF
+  for current in dat[:-1]:
+    shift = 0x80
+    for _ in range(8):
+      bit_sum = current & shift
+      temp_checksum = checksum & 0x80
+      if bit_sum:
+        bit_sum = 0x1C
+        if temp_checksum:
+          bit_sum = 1
+        checksum = (checksum << 1) & 0xFF
+        temp_checksum = checksum | 1
+        bit_sum ^= temp_checksum
+      else:
+        if temp_checksum:
+          bit_sum = 0x1D
+        checksum = (checksum << 1) & 0xFF
+        bit_sum ^= checksum
+      checksum = bit_sum & 0xFF
+      shift >>= 1
+  return (~checksum) & 0xFF
+
+
 @dataclass(frozen=True)
 class JeepLongitudinalEnvelope:
   requested_accel: float
@@ -55,10 +80,13 @@ class JeepLongitudinalShadow:
     self.accel_last = limited_accel
     brake_active = eligible and limited_accel < -ACCEL_DEADBAND
     engine_active = eligible and limited_accel > ACCEL_DEADBAND
-    engine_torque_nm = clip(
-      max(0.0, limited_accel) * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO,
-      0.0,
-      ENGINE_TORQUE_MAX_NM,
+    engine_torque_nm = (
+      clip(
+        limited_accel * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO,
+        0.0,
+        ENGINE_TORQUE_MAX_NM,
+      )
+      if engine_active else 0.0
     )
 
     return JeepLongitudinalEnvelope(

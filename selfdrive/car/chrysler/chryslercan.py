@@ -1,4 +1,5 @@
 from cereal import car
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import fca_checksum
 from openpilot.selfdrive.car.chrysler.values import RAM_CARS
 
 GearShifter = car.CarState.GearShifter
@@ -109,6 +110,14 @@ def das_3_command(packer, counter_offset, go, torque_req, torque, max_gear, stop
   return packer.make_can_msg("DAS_3", 0, values)
 
 
+def make_wp_private_message(packer, name, values):
+  values = values.copy()
+  values["CHECKSUM"] = 0
+  unsigned = packer.make_can_msg(name, 0, values)
+  values["CHECKSUM"] = fca_checksum(unsigned[2])
+  return packer.make_can_msg(name, 0, values)
+
+
 def create_wp_long_shadow_messages(packer, envelope, counter):
   """Pack calibrated Jeep White Panda commands with OP longitudinal disabled."""
   counter %= 0x10
@@ -127,13 +136,8 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
     "COUNTER": counter,
   }
   dash_values = {
-    "ACC_DISP_MSG": 0,
-    "ACC_SET_SPEED_KPH": 0,
-    "ACC_SET_SPEED_MPH": 0,
     "OP_LONG_ENABLE": 0,
-    "CRUISE_STATE": 0,
-    "CRUISE_ICON": 0,
-    "LEAD_DIST": 255,
+    "COUNTER": counter,
   }
   torque_values = {
     "ENGINE_TORQUE_REQUEST_MAX": envelope.engine_active,
@@ -141,9 +145,9 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
     "COUNTER": counter,
   }
   return [
-    packer.make_can_msg("WP_ACC_BRAKE_CMD", 0, brake_values),
-    packer.make_can_msg("WP_ACC_DASH_CMD", 0, dash_values),
-    packer.make_can_msg("WP_ACC_TORQUE_CMD", 0, torque_values),
+    make_wp_private_message(packer, "WP_ACC_BRAKE_CMD", brake_values),
+    make_wp_private_message(packer, "WP_ACC_DASH_CMD", dash_values),
+    make_wp_private_message(packer, "WP_ACC_TORQUE_CMD", torque_values),
   ]
 
 
