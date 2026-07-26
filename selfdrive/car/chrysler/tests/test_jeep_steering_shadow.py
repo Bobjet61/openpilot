@@ -8,7 +8,9 @@ import unittest
 CHRYSLER_PATH = Path(__file__).resolve().parents[1]
 SHADOW_PATH = CHRYSLER_PATH / "jeep_steering_shadow.py"
 CONTROLLER_PATH = CHRYSLER_PATH / "carcontroller.py"
+INTERFACE_PATH = CHRYSLER_PATH / "interface.py"
 VALUES_PATH = CHRYSLER_PATH / "values.py"
+PANDA_PY_PATH = CHRYSLER_PATH.parents[2] / "panda" / "python" / "__init__.py"
 
 SHADOW_SPEC = importlib.util.spec_from_file_location(
   "jeep_steering_shadow_under_test",
@@ -226,7 +228,7 @@ class TestJeepSteeringShadow(unittest.TestCase):
     self.assertEqual(self.rate4_shadow.snapshot().samples, 1)
     self.assertEqual(self.rate4_shadow.snapshot().samples, 0)
 
-  def test_diagnostic_has_no_output_path_and_limit_is_unchanged(self):
+  def test_diagnostic_has_no_output_path_and_jeep_rate4_is_explicit(self):
     shadow_source = SHADOW_PATH.read_text(encoding="utf-8")
     for forbidden in (
       "CANPacker",
@@ -239,8 +241,18 @@ class TestJeepSteeringShadow(unittest.TestCase):
 
     values_source = VALUES_PATH.read_text(encoding="utf-8")
     self.assertIn("self.STEER_MAX = 261", values_source)
-    self.assertIn("self.STEER_DELTA_UP = 3", values_source)
-    self.assertIn("self.STEER_DELTA_DOWN = 3", values_source)
+    self.assertIn("self.STEER_DELTA_UP = 4", values_source)
+    self.assertIn("self.STEER_DELTA_DOWN = 4", values_source)
+    self.assertIn("CAR.JEEP_GRAND_CHEROKEE_2019", values_source)
+
+    interface_source = INTERFACE_PATH.read_text(encoding="utf-8")
+    self.assertIn(
+      "ret.safetyConfigs[0].safetyParam |= "
+      "Panda.FLAG_CHRYSLER_JEEP_RATE4",
+      interface_source,
+    )
+    panda_source = PANDA_PY_PATH.read_text(encoding="utf-8")
+    self.assertIn("FLAG_CHRYSLER_JEEP_RATE4 = 8", panda_source)
 
     controller_source = CONTROLLER_PATH.read_text(encoding="utf-8")
     self.assertIn(
@@ -251,6 +263,7 @@ class TestJeepSteeringShadow(unittest.TestCase):
       "apply_steer = self.jeep_steering_rate4_shadow",
       controller_source,
     )
+    self.assertIn("candidate_applied=True", controller_source)
 
     controller_tree = ast.parse(
       CONTROLLER_PATH.read_text(encoding="utf-8"),

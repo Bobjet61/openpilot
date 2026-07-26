@@ -553,8 +553,8 @@ class CarController(CarControllerBase):
       f"max_divergence={window.max_candidate_divergence},"
       f"mean_gap_rate3={window.mean_current_request_gap:.3f},"
       f"mean_gap_rate4={window.mean_candidate_request_gap:.3f},"
-      f"applied_rate=3,candidate_rate=4,"
-      f"candidate_applied=False"
+      f"applied_rate={self.params.STEER_DELTA_UP},candidate_rate=4,"
+      f"candidate_applied=True"
     )
 
   def brake_hold(self, CC, CS, can_sends):
