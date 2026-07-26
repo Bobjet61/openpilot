@@ -1,10 +1,10 @@
 from dataclasses import dataclass
 
 
-# Independent host-to-Panda transport gate. This remains false in every
-# vehicle build. A future disconnected-bench-only build may change this gate
-# without enabling longitudinal actuation.
-JEEP_LONG_SHADOW_TRANSPORT_COMPILED = False
+# Independent host-to-Panda transport gate. The b8t branch enables only the
+# private transport path; every transmitted actuator field is hard-coded
+# neutral and OP_LONG_ENABLE remains false.
+JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
 
 # Independent actuation gate. Enabling this without transport is invalid, and
 # both Panda layers retain their own hard-off actuation gates.

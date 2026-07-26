@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sys
+from types import ModuleType, SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ PLANNER_PATH = (
 )
 CARCONTROLLER_PATH = Path(__file__).resolve().parents[1] / "carcontroller.py"
 INTERFACE_PATH = Path(__file__).resolve().parents[1] / "interface.py"
+CHRYSLERCAN_PATH = Path(__file__).resolve().parents[1] / "chryslercan.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
 assert LONG_SPEC is not None and LONG_SPEC.loader is not None
 LONG = importlib.util.module_from_spec(LONG_SPEC)
@@ -26,26 +28,95 @@ fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
 
+class PrivateMessagePacker:
+  """Small byte-level packer for the three private transport frames."""
+
+  ADDRESSES = {
+    "WP_ACC_BRAKE_CMD": 0x1F6,
+    "WP_ACC_DASH_CMD": 0x1F7,
+    "WP_ACC_TORQUE_CMD": 0x272,
+  }
+
+  def make_can_msg(self, name, bus, values):
+    dat = bytearray(8)
+    if name == "WP_ACC_BRAKE_CMD":
+      dat[0] |= int(values.get("ACC_STOP", 0)) << 5
+      dat[0] |= int(values.get("ACC_GO", 0)) << 6
+      decel_raw = round((values.get("ACC_DECEL_CMD", -16.0) + 16.0) / 0.004885)
+      dat[2] |= (decel_raw >> 8) & 0xF
+      dat[2] |= int(values.get("ACC_AVAILABLE", 0)) << 4
+      dat[2] |= int(values.get("ACC_ENABLED", 0)) << 5
+      dat[3] = decel_raw & 0xFF
+      dat[4] |= int(values.get("COMMAND_TYPE", 0)) << 4
+      dat[6] |= int(values.get("ACC_BRK_PREP", 0)) << 1
+    elif name == "WP_ACC_DASH_CMD":
+      dat[3] |= int(values.get("OP_LONG_ENABLE", 0))
+    elif name == "WP_ACC_TORQUE_CMD":
+      torque_raw = round((values.get("ENGINE_TORQUE_REQUEST", -500.0) + 500.0) / 0.25)
+      dat[4] |= int(values.get("ENGINE_TORQUE_REQUEST_MAX", 0)) << 7
+      dat[4] |= (torque_raw >> 8) & 0x7F
+      dat[5] = torque_raw & 0xFF
+    else:
+      raise ValueError(name)
+
+    dat[6] |= (int(values.get("COUNTER", 0)) & 0xF) << 4
+    dat[7] = int(values.get("CHECKSUM", 0))
+    return self.ADDRESSES[name], bus, bytes(dat), 0
+
+
+def load_chryslercan():
+  cereal = ModuleType("cereal")
+  cereal.car = SimpleNamespace(
+    CarState=SimpleNamespace(GearShifter=SimpleNamespace()),
+    CarControl=SimpleNamespace(
+      HUDControl=SimpleNamespace(VisualAlert=SimpleNamespace()),
+    ),
+  )
+  long_module = ModuleType(
+    "openpilot.selfdrive.car.chrysler.jeep_longitudinal",
+  )
+  long_module.fca_checksum = fca_checksum
+  values_module = ModuleType("openpilot.selfdrive.car.chrysler.values")
+  values_module.RAM_CARS = set()
+  with patch.dict(sys.modules, {
+    "cereal": cereal,
+    "openpilot.selfdrive.car.chrysler.jeep_longitudinal": long_module,
+    "openpilot.selfdrive.car.chrysler.values": values_module,
+  }):
+    spec = importlib.util.spec_from_file_location(
+      "chryslercan_transport_under_test",
+      CHRYSLERCAN_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+  return module
+
+
 class TestJeepLongitudinalShadow(unittest.TestCase):
-  def test_actuation_is_compile_time_off(self):
+  def test_transport_is_on_but_actuation_is_compile_time_off(self):
     self.assertFalse(JEEP_LONG_ACTUATION_COMPILED)
-    self.assertFalse(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
+    self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
-    self.assertFalse(result.transport_enabled)
+    self.assertTrue(result.transport_enabled)
     self.assertFalse(result.host_enabled)
 
   def test_committed_vehicle_path_keeps_shadow_frames_and_longitudinal_off(self):
     carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
-    guarded_append = (
+    guarded_transport_append = (
       "if self.jeep_long_envelope.transport_enabled:\n"
-      "        can_sends.extend(self.jeep_long_shadow_frames)"
+      "        self.jeep_long_transport_frames = ("
     )
-    self.assertIn(guarded_append, carcontroller_source)
+    self.assertIn(guarded_transport_append, carcontroller_source)
     self.assertEqual(
       carcontroller_source.count(
-        "can_sends.extend(self.jeep_long_shadow_frames)",
+        "can_sends.extend(self.jeep_long_transport_frames)",
       ),
       1,
+    )
+    self.assertNotIn(
+      "can_sends.extend(self.jeep_long_shadow_frames)",
+      carcontroller_source,
     )
 
     interface_source = INTERFACE_PATH.read_text(encoding="utf-8")
@@ -107,14 +178,9 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       self.assertFalse(result.transport_enabled)
       self.assertFalse(result.host_enabled)
 
-  def test_committed_transport_gate_leaves_panda_param_off(self):
-    self.assertEqual(jeep_long_shadow_safety_param(0, 4), 0)
-    self.assertEqual(jeep_long_shadow_safety_param(2, 4), 2)
-
-  def test_hypothetical_transport_adds_only_shadow_param(self):
-    with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):
-      self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
-      self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
+  def test_committed_transport_adds_only_shadow_param(self):
+    self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
+    self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
 
   def test_requested_accel_is_clipped(self):
     positive = JeepLongitudinalShadow().update(20.0, eligible=True)
@@ -161,6 +227,28 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual(fca_checksum(payload), checksum)
     payload[1] ^= 1
     self.assertNotEqual(fca_checksum(payload), checksum)
+
+  def test_transmitted_probe_bytes_are_strictly_neutral(self):
+    chryslercan = load_chryslercan()
+    brake, dash, torque = chryslercan.create_wp_long_transport_messages(
+      PrivateMessagePacker(), 13,
+    )
+
+    self.assertEqual((brake[0], dash[0], torque[0]), (0x1F6, 0x1F7, 0x272))
+    self.assertEqual(((brake[2][2] & 0xF) << 8) | brake[2][3], 4094)
+    self.assertEqual((brake[2][4] >> 4) & 0x7, 0)
+    self.assertEqual((brake[2][6] >> 1) & 0x1, 0)
+    self.assertEqual(dash[2][3] & 0x1, 0)
+    self.assertEqual(torque[2][4] >> 7, 0)
+    self.assertEqual(((torque[2][4] & 0x7F) << 8) | torque[2][5], 2000)
+    self.assertEqual(
+      tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)),
+      (13, 13, 13),
+    )
+    self.assertTrue(
+      all(msg[2][7] == fca_checksum(msg[2])
+          for msg in (brake, dash, torque)),
+    )
 
 
 if __name__ == "__main__":

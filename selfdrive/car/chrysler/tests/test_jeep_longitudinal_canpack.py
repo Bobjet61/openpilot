@@ -103,6 +103,28 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
       fca_checksum(hypothetical_enabled_dash[2]),
     )
 
+  def test_transport_probe_is_strictly_neutral(self):
+    brake, dash, torque = chryslercan.create_wp_long_transport_messages(
+      self.packer, 13,
+    )
+
+    brake_raw = ((brake[2][2] & 0xF) << 8) | brake[2][3]
+    torque_raw = ((torque[2][4] & 0x7F) << 8) | torque[2][5]
+    self.assertEqual(brake_raw, 4094)
+    self.assertEqual((brake[2][4] >> 4) & 0x7, 0)
+    self.assertEqual((brake[2][6] >> 1) & 0x1, 0)
+    self.assertEqual(dash[2][3] & 0x1, 0)
+    self.assertEqual(torque[2][4] >> 7, 0)
+    self.assertEqual(torque_raw, 2000)
+    self.assertEqual(
+      tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)),
+      (13, 13, 13),
+    )
+    self.assertTrue(
+      all(msg[2][7] == fca_checksum(msg[2])
+          for msg in (brake, dash, torque)),
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

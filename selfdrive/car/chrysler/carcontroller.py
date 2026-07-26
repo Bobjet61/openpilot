@@ -41,6 +41,7 @@ class CarController(CarControllerBase):
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
+    self.jeep_long_transport_frames = []
     self.jeep_long_plan_sm = (
       messaging.SubMaster(["longitudinalPlan"])
       if CP.carFingerprint in BRAKE_HOLD_CARS else None
@@ -174,7 +175,13 @@ class CarController(CarControllerBase):
       self.jeep_long_shadow_frames = chryslercan.create_wp_long_shadow_messages(
         self.packer, self.jeep_long_envelope, self.frame // 2)
       if self.jeep_long_envelope.transport_enabled:
-        can_sends.extend(self.jeep_long_shadow_frames)
+        self.jeep_long_transport_frames = (
+          chryslercan.create_wp_long_transport_messages(
+            self.packer, self.frame // 2)
+        )
+        can_sends.extend(self.jeep_long_transport_frames)
+      else:
+        self.jeep_long_transport_frames = []
 
     if self.frame % 100 == 0 and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       cloudlog.info(

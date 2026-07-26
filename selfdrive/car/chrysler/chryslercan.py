@@ -151,6 +151,35 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
   ]
 
 
+def create_wp_long_transport_messages(packer, counter):
+  """Pack a transport probe that cannot request propulsion or braking."""
+  counter %= 0x10
+  brake_values = {
+    "ACC_STOP": 0,
+    "ACC_GO": 0,
+    "ACC_DECEL_CMD": 4.0,
+    "ACC_AVAILABLE": 1,
+    "ACC_ENABLED": 1,
+    "ACC_BRK_PREP": 0,
+    "COMMAND_TYPE": 0,
+    "COUNTER": counter,
+  }
+  dash_values = {
+    "OP_LONG_ENABLE": 0,
+    "COUNTER": counter,
+  }
+  torque_values = {
+    "ENGINE_TORQUE_REQUEST_MAX": 0,
+    "ENGINE_TORQUE_REQUEST": 0.0,
+    "COUNTER": counter,
+  }
+  return [
+    make_wp_private_message(packer, "WP_ACC_BRAKE_CMD", brake_values),
+    make_wp_private_message(packer, "WP_ACC_DASH_CMD", dash_values),
+    make_wp_private_message(packer, "WP_ACC_TORQUE_CMD", torque_values),
+  ]
+
+
 def create_lkas_heartbit(packer, lkas_disabled, lkas_heartbit):
   # LKAS_HEARTBIT (697) LKAS heartbeat
   values = lkas_heartbit.copy()  # forward what we parsed
