@@ -437,6 +437,13 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
                                (uint32_t)decel_raw);
     } else if (!interval_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_INTERVAL, elapsed);
+      // The frame remains blocked, but retain its valid input counter so an
+      // intentional rate-floor rejection does not poison the following
+      // counter sequence. Keep last_cycle_ts unchanged: accepted private
+      // frames must still remain at least 15 ms apart.
+      if (counter_valid) {
+        chrysler_long_last_counter = (uint8_t)counter;
+      }
     } else if (!counter_valid) {
       const uint32_t expected =
         (uint32_t)((chrysler_long_last_counter + 1U) & 0xFU);

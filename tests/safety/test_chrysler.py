@@ -390,6 +390,51 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertFalse(self._tx(msg))
     self.assertEqual(self._reject_diagnostic(msg), (0xD7, 22, 10_000))
 
+  def test_rate_rejection_tracks_valid_counter_without_transmitting(self):
+    self._reset_long_shadow(diagnostic=True)
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 1_000_000), (True, True, True))
+
+    # Counter 1 is well-formed but too early, so the complete cycle is blocked.
+    self.assertEqual(
+      self._tx_private_cycle(1, 1_012_000),
+      (False, False, False),
+    )
+
+    # Counter 2 is accepted because the rate-rejected input counter was
+    # observed, while accepted-frame spacing still uses the original timestamp.
+    self.assertEqual(
+      self._tx_private_cycle(2, 1_032_000),
+      (True, True, True),
+    )
+
+  def test_repeated_rate_rejections_preserve_accepted_frame_floor(self):
+    self._reset_long_shadow()
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 1_000_000), (True, True, True))
+
+    for counter, time_us in ((1, 1_012_000), (2, 1_013_000), (3, 1_014_000)):
+      self.assertEqual(
+        self._tx_private_cycle(counter, time_us),
+        (False, False, False),
+      )
+
+    # No frame can pass until 15 ms after the last accepted frame.
+    self.assertEqual(self._tx_private_cycle(4, 1_015_000), (True, True, True))
+
+  def test_bad_early_counter_cannot_use_rate_recovery(self):
+    self._reset_long_shadow()
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 1_000_000), (True, True, True))
+
+    # Skipping counter 1 is invalid even though the frame is also too early.
+    self.assertFalse(self._tx(self._private_brake_msg(2)))
+    self.safety.set_timer(1_020_000)
+    self.assertFalse(self._tx(self._private_brake_msg(3)))
+
   def test_reject_diagnostic_exposes_counter_mismatch(self):
     self._reset_long_shadow(diagnostic=True)
     self.safety.set_timer(1_000_000)
