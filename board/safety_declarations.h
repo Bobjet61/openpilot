@@ -212,6 +212,12 @@ void safety_tick(const safety_config *safety_config);
 bool disengageFromBrakes = false;
 bool controls_allowed = false;
 bool controls_allowed_long = false;
+// Optional per-policy diagnostics for a rejected host TX packet. Safety modes
+// leave these at zero unless an explicitly enabled diagnostic policy sets
+// them. safety_tx_hook() copies them only into the USB rejection receipt;
+// rejected packets are never placed on a vehicle CAN transmit queue.
+uint8_t safety_tx_reject_reason = 0U;
+uint32_t safety_tx_reject_detail = 0U;
 bool relay_malfunction = false;
 bool enable_gas_interceptor = false;
 int gas_interceptor_prev = 0;

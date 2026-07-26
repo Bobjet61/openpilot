@@ -76,13 +76,31 @@ bool safety_rx_hook(const CANPacket_t *to_push) {
 }
 
 bool safety_tx_hook(CANPacket_t *to_send) {
+  safety_tx_reject_reason = 0U;
+  safety_tx_reject_detail = 0U;
+
   bool whitelisted = msg_allowed(to_send, current_safety_config.tx_msgs, current_safety_config.tx_msgs_len);
   if ((current_safety_mode == SAFETY_ALLOUTPUT) || (current_safety_mode == SAFETY_ELM327)) {
     whitelisted = true;
   }
 
   const bool safety_allowed = current_hooks->tx(to_send);
-  return !relay_malfunction && whitelisted && safety_allowed;
+  const bool tx_allowed = !relay_malfunction && whitelisted && safety_allowed;
+
+  // A policy may tag a rejected frame for diagnosis on the host. This payload
+  // mutation happens only after the final decision is known to be rejection.
+  // can_send() then returns the packet to USB with rejected=1; it is never
+  // queued to a physical CAN controller.
+  if (!tx_allowed && (safety_tx_reject_reason != 0U) && (GET_LEN(to_send) >= 6U)) {
+    to_send->data[0] = 0xD7U;
+    to_send->data[1] = safety_tx_reject_reason;
+    to_send->data[2] = (uint8_t)(safety_tx_reject_detail & 0xFFU);
+    to_send->data[3] = (uint8_t)((safety_tx_reject_detail >> 8U) & 0xFFU);
+    to_send->data[4] = (uint8_t)((safety_tx_reject_detail >> 16U) & 0xFFU);
+    to_send->data[5] = (uint8_t)((safety_tx_reject_detail >> 24U) & 0xFFU);
+  }
+
+  return tx_allowed;
 }
 
 int safety_fwd_hook(int bus_num, int addr) {

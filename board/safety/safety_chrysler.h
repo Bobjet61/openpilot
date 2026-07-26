@@ -177,6 +177,7 @@ const uint32_t CHRYSLER_PARAM_RAM_DT = 1U;  // set for Ram DT platform
 const uint32_t CHRYSLER_PARAM_RAM_HD = 2U;  // set for Ram HD platform
 const uint32_t CHRYSLER_PARAM_JEEP_LONG_SHADOW = 4U;
 const uint32_t CHRYSLER_PARAM_JEEP_RATE4 = 8U;
+const uint32_t CHRYSLER_PARAM_JEEP_LONG_DIAGNOSTIC = 16U;
 
 typedef enum {
   CHRYSLER_RAM_DT,
@@ -189,6 +190,7 @@ static uint8_t chrysler_das_3_last[8] = {0};
 static bool chrysler_das_3_last_valid = false;
 static bool chrysler_long_shadow_enabled = false;
 static bool chrysler_jeep_rate4_enabled = false;
+static bool chrysler_long_diagnostic_enabled = false;
 static bool chrysler_long_stock_collision = false;
 static bool chrysler_long_speed_seen = false;
 static bool chrysler_long_gas_seen = false;
@@ -204,6 +206,50 @@ static uint8_t chrysler_long_last_counter = 0U;
 static bool chrysler_long_counter_seen = false;
 static bool chrysler_long_brake_active = false;
 static uint32_t chrysler_long_last_cycle_ts = 0U;
+
+typedef enum {
+  CHRYSLER_LONG_REJECT_NONE = 0U,
+  CHRYSLER_LONG_REJECT_SHADOW_DISABLED = 1U,
+  CHRYSLER_LONG_REJECT_PLATFORM = 2U,
+  CHRYSLER_LONG_REJECT_BRAKE_STAGE = 3U,
+  CHRYSLER_LONG_REJECT_CONTROLS = 4U,
+  CHRYSLER_LONG_REJECT_CONTROLS_LONG = 5U,
+  CHRYSLER_LONG_REJECT_ACC_MAIN = 6U,
+  CHRYSLER_LONG_REJECT_STOPPED = 7U,
+  CHRYSLER_LONG_REJECT_GAS = 8U,
+  CHRYSLER_LONG_REJECT_BRAKE = 9U,
+  CHRYSLER_LONG_REJECT_COLLISION = 10U,
+  CHRYSLER_LONG_REJECT_SPEED_MISSING = 11U,
+  CHRYSLER_LONG_REJECT_SPEED_STALE = 12U,
+  CHRYSLER_LONG_REJECT_GAS_MISSING = 13U,
+  CHRYSLER_LONG_REJECT_GAS_STALE = 14U,
+  CHRYSLER_LONG_REJECT_BRAKE_MISSING = 15U,
+  CHRYSLER_LONG_REJECT_BRAKE_STALE = 16U,
+  CHRYSLER_LONG_REJECT_STOCK_MISSING = 17U,
+  CHRYSLER_LONG_REJECT_STOCK_STALE = 18U,
+  CHRYSLER_LONG_REJECT_BRAKE_CHECKSUM = 19U,
+  CHRYSLER_LONG_REJECT_BRAKE_PAYLOAD = 20U,
+  CHRYSLER_LONG_REJECT_BRAKE_COMMAND = 21U,
+  CHRYSLER_LONG_REJECT_INTERVAL = 22U,
+  CHRYSLER_LONG_REJECT_COUNTER = 23U,
+  CHRYSLER_LONG_REJECT_DASH_STAGE = 24U,
+  CHRYSLER_LONG_REJECT_DASH_COUNTER = 25U,
+  CHRYSLER_LONG_REJECT_DASH_CHECKSUM = 26U,
+  CHRYSLER_LONG_REJECT_DASH_PAYLOAD = 27U,
+  CHRYSLER_LONG_REJECT_TORQUE_STAGE = 28U,
+  CHRYSLER_LONG_REJECT_TORQUE_COUNTER = 29U,
+  CHRYSLER_LONG_REJECT_TORQUE_CHECKSUM = 30U,
+  CHRYSLER_LONG_REJECT_TORQUE_PAYLOAD = 31U,
+  CHRYSLER_LONG_REJECT_TORQUE_CONFLICT = 32U,
+} ChryslerLongRejectReason;
+
+static void chrysler_long_set_reject(const uint8_t reason,
+                                     const uint32_t detail) {
+  if (chrysler_long_diagnostic_enabled) {
+    safety_tx_reject_reason = reason;
+    safety_tx_reject_detail = detail;
+  }
+}
 
 static uint32_t chrysler_get_checksum(const CANPacket_t *to_push) {
   int checksum_byte = GET_LEN(to_push) - 1U;
@@ -253,19 +299,49 @@ static bool chrysler_long_fresh(const uint32_t now, const uint32_t last,
          (get_ts_elapsed(now, last) <= CHRYSLER_LONG_SOURCE_TIMEOUT_US);
 }
 
-static bool chrysler_long_source_safe(void) {
+static uint8_t chrysler_long_source_reject_reason(uint32_t *detail) {
   const uint32_t now = microsecond_timer_get();
-  return controls_allowed && controls_allowed_long && acc_main_on &&
-         vehicle_moving && !gas_pressed && !brake_pressed &&
-         !chrysler_long_stock_collision &&
-         chrysler_long_fresh(now, chrysler_long_speed_ts,
-                             chrysler_long_speed_seen) &&
-         chrysler_long_fresh(now, chrysler_long_gas_ts,
-                             chrysler_long_gas_seen) &&
-         chrysler_long_fresh(now, chrysler_long_brake_ts,
-                             chrysler_long_brake_seen) &&
-         chrysler_long_fresh(now, chrysler_long_stock_ts,
-                             chrysler_long_stock_seen);
+  uint8_t reason = CHRYSLER_LONG_REJECT_NONE;
+  *detail = 0U;
+
+  if (!controls_allowed) {
+    reason = CHRYSLER_LONG_REJECT_CONTROLS;
+  } else if (!controls_allowed_long) {
+    reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
+  } else if (!acc_main_on) {
+    reason = CHRYSLER_LONG_REJECT_ACC_MAIN;
+  } else if (!vehicle_moving) {
+    reason = CHRYSLER_LONG_REJECT_STOPPED;
+  } else if (gas_pressed) {
+    reason = CHRYSLER_LONG_REJECT_GAS;
+  } else if (brake_pressed) {
+    reason = CHRYSLER_LONG_REJECT_BRAKE;
+  } else if (chrysler_long_stock_collision) {
+    reason = CHRYSLER_LONG_REJECT_COLLISION;
+  } else if (!chrysler_long_speed_seen) {
+    reason = CHRYSLER_LONG_REJECT_SPEED_MISSING;
+  } else if (!chrysler_long_fresh(now, chrysler_long_speed_ts, true)) {
+    reason = CHRYSLER_LONG_REJECT_SPEED_STALE;
+    *detail = get_ts_elapsed(now, chrysler_long_speed_ts);
+  } else if (!chrysler_long_gas_seen) {
+    reason = CHRYSLER_LONG_REJECT_GAS_MISSING;
+  } else if (!chrysler_long_fresh(now, chrysler_long_gas_ts, true)) {
+    reason = CHRYSLER_LONG_REJECT_GAS_STALE;
+    *detail = get_ts_elapsed(now, chrysler_long_gas_ts);
+  } else if (!chrysler_long_brake_seen) {
+    reason = CHRYSLER_LONG_REJECT_BRAKE_MISSING;
+  } else if (!chrysler_long_fresh(now, chrysler_long_brake_ts, true)) {
+    reason = CHRYSLER_LONG_REJECT_BRAKE_STALE;
+    *detail = get_ts_elapsed(now, chrysler_long_brake_ts);
+  } else if (!chrysler_long_stock_seen) {
+    reason = CHRYSLER_LONG_REJECT_STOCK_MISSING;
+  } else if (!chrysler_long_fresh(now, chrysler_long_stock_ts, true)) {
+    reason = CHRYSLER_LONG_REJECT_STOCK_STALE;
+    *detail = get_ts_elapsed(now, chrysler_long_stock_ts);
+  } else {
+  }
+
+  return reason;
 }
 
 static void chrysler_long_reset_pending(void) {
@@ -279,11 +355,18 @@ static bool chrysler_long_checksum_valid(const CANPacket_t *to_send) {
 }
 
 static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
-  bool allowed = chrysler_long_shadow_enabled &&
-                 (chrysler_platform == CHRYSLER_PACIFICA) &&
-                 (chrysler_long_stage == 0U) &&
-                 chrysler_long_source_safe() &&
-                 chrysler_long_checksum_valid(to_send);
+  const bool shadow_valid = chrysler_long_shadow_enabled;
+  const bool platform_valid = chrysler_platform == CHRYSLER_PACIFICA;
+  const bool stage_valid = chrysler_long_stage == 0U;
+  uint32_t source_detail = 0U;
+  uint8_t source_reason = CHRYSLER_LONG_REJECT_NONE;
+  if (shadow_valid && platform_valid && stage_valid) {
+    source_reason = chrysler_long_source_reject_reason(&source_detail);
+  }
+  const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
+  const bool checksum_valid =
+    shadow_valid && platform_valid && stage_valid && source_valid &&
+    chrysler_long_checksum_valid(to_send);
 
   const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
   const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) |
@@ -299,26 +382,32 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
     (GET_BYTE(to_send, 5) == 0U) &&
     ((GET_BYTE(to_send, 6) & 0xFU) == 0U) &&
     acc_available_cmd && acc_enabled_cmd;
-  allowed = allowed && brake_fields_valid;
-
+  bool command_valid = false;
   if (command_type == 1) {
-    allowed = allowed &&
-              (decel_raw >= CHRYSLER_LONG_DECEL_MIN_RAW) &&
-              (decel_raw <= CHRYSLER_LONG_DECEL_MAX_RAW);
+    command_valid =
+      (decel_raw >= CHRYSLER_LONG_DECEL_MIN_RAW) &&
+      (decel_raw <= CHRYSLER_LONG_DECEL_MAX_RAW);
   } else {
-    allowed = allowed && (command_type == 0) &&
-              (decel_raw == CHRYSLER_LONG_DECEL_INACTIVE_RAW);
+    command_valid =
+      (command_type == 0) &&
+      (decel_raw == CHRYSLER_LONG_DECEL_INACTIVE_RAW);
   }
 
+  bool allowed = shadow_valid && platform_valid && stage_valid &&
+                 source_valid && checksum_valid && brake_fields_valid &&
+                 command_valid;
   const uint32_t now = microsecond_timer_get();
+  uint32_t elapsed = 0U;
+  bool interval_valid = true;
+  bool counter_valid = true;
   if (allowed && chrysler_long_counter_seen) {
-    const uint32_t elapsed =
-      get_ts_elapsed(now, chrysler_long_last_cycle_ts);
-    allowed = elapsed >= CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US;
+    elapsed = get_ts_elapsed(now, chrysler_long_last_cycle_ts);
+    interval_valid = elapsed >= CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US;
     if (elapsed <= CHRYSLER_LONG_COUNTER_RESET_US) {
-      allowed = allowed &&
-                (counter == ((chrysler_long_last_counter + 1U) & 0xFU));
+      counter_valid =
+        counter == ((chrysler_long_last_counter + 1U) & 0xFU);
     }
+    allowed = interval_valid && counter_valid;
   }
 
   if (allowed) {
@@ -329,6 +418,33 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
     chrysler_long_last_cycle_ts = now;
     chrysler_long_stage = 1U;
   } else {
+    if (!shadow_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_SHADOW_DISABLED, 0U);
+    } else if (!platform_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_PLATFORM,
+                               (uint32_t)chrysler_platform);
+    } else if (!stage_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_BRAKE_STAGE,
+                               (uint32_t)chrysler_long_stage);
+    } else if (!source_valid) {
+      chrysler_long_set_reject(source_reason, source_detail);
+    } else if (!checksum_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_BRAKE_CHECKSUM, 0U);
+    } else if (!brake_fields_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_BRAKE_PAYLOAD, 0U);
+    } else if (!command_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_BRAKE_COMMAND,
+                               (uint32_t)decel_raw);
+    } else if (!interval_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_INTERVAL, elapsed);
+    } else if (!counter_valid) {
+      const uint32_t expected =
+        (uint32_t)((chrysler_long_last_counter + 1U) & 0xFU);
+      chrysler_long_set_reject(
+        CHRYSLER_LONG_REJECT_COUNTER,
+        (expected << 8U) | (uint32_t)counter);
+    } else {
+    }
     chrysler_long_reset_pending();
   }
   return allowed;
@@ -336,11 +452,11 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
 
 static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
   const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
-  const bool allowed =
-    chrysler_long_shadow_enabled &&
-    (chrysler_long_stage == 1U) &&
-    (counter == chrysler_long_cycle_counter) &&
-    chrysler_long_checksum_valid(to_send) &&
+  const bool shadow_valid = chrysler_long_shadow_enabled;
+  const bool stage_valid = chrysler_long_stage == 1U;
+  const bool counter_valid = counter == chrysler_long_cycle_counter;
+  const bool checksum_valid = chrysler_long_checksum_valid(to_send);
+  const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
     (GET_BYTE(to_send, 1) == 0U) &&
     (GET_BYTE(to_send, 2) == 0U) &&
@@ -348,10 +464,27 @@ static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
     (GET_BYTE(to_send, 4) == 0U) &&
     (GET_BYTE(to_send, 5) == 0U) &&
     ((GET_BYTE(to_send, 6) & 0xFU) == 0U);
+  const bool allowed = shadow_valid && stage_valid && counter_valid &&
+                       checksum_valid && payload_valid;
 
   if (allowed) {
     chrysler_long_stage = 2U;
   } else {
+    if (!shadow_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_SHADOW_DISABLED, 0U);
+    } else if (!stage_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_DASH_STAGE,
+                               (uint32_t)chrysler_long_stage);
+    } else if (!counter_valid) {
+      chrysler_long_set_reject(
+        CHRYSLER_LONG_REJECT_DASH_COUNTER,
+        ((uint32_t)chrysler_long_cycle_counter << 8U) | (uint32_t)counter);
+    } else if (!checksum_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_DASH_CHECKSUM, 0U);
+    } else if (!payload_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_DASH_PAYLOAD, 0U);
+    } else {
+    }
     chrysler_long_reset_pending();
   }
   return allowed;
@@ -362,25 +495,50 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
   const bool engine_request = GET_BIT(to_send, 39U);
   const int torque_raw = ((GET_BYTE(to_send, 4) & 0x7FU) << 8) |
                          GET_BYTE(to_send, 5);
-  bool allowed =
-    chrysler_long_shadow_enabled &&
-    (chrysler_long_stage == 2U) &&
-    (counter == chrysler_long_cycle_counter) &&
-    chrysler_long_checksum_valid(to_send) &&
+  const bool shadow_valid = chrysler_long_shadow_enabled;
+  const bool stage_valid = chrysler_long_stage == 2U;
+  const bool counter_valid = counter == chrysler_long_cycle_counter;
+  const bool checksum_valid = chrysler_long_checksum_valid(to_send);
+  const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
     (GET_BYTE(to_send, 1) == 0U) &&
     (GET_BYTE(to_send, 2) == 0U) &&
     (GET_BYTE(to_send, 3) == 0U) &&
-    ((GET_BYTE(to_send, 6) & 0xFU) == 0U) &&
+    ((GET_BYTE(to_send, 6) & 0xFU) == 0U);
+  const bool conflict_valid =
     !(chrysler_long_brake_active && engine_request);
 
+  bool command_valid = false;
   if (engine_request) {
-    allowed = allowed &&
-              (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW) &&
-              (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+    command_valid =
+      (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW) &&
+      (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
   } else {
-    allowed = allowed &&
-              (torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW);
+    command_valid = torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW;
+  }
+  const bool allowed = shadow_valid && stage_valid && counter_valid &&
+                       checksum_valid && payload_valid && conflict_valid &&
+                       command_valid;
+
+  if (!allowed) {
+    if (!shadow_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_SHADOW_DISABLED, 0U);
+    } else if (!stage_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_STAGE,
+                               (uint32_t)chrysler_long_stage);
+    } else if (!counter_valid) {
+      chrysler_long_set_reject(
+        CHRYSLER_LONG_REJECT_TORQUE_COUNTER,
+        ((uint32_t)chrysler_long_cycle_counter << 8U) | (uint32_t)counter);
+    } else if (!checksum_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_CHECKSUM, 0U);
+    } else if (!payload_valid || !command_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_PAYLOAD,
+                               (uint32_t)torque_raw);
+    } else if (!conflict_valid) {
+      chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_CONFLICT, 0U);
+    } else {
+    }
   }
 
   chrysler_long_reset_pending();
@@ -552,6 +710,7 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_das_3_last_valid = false;
   chrysler_long_shadow_enabled = false;
   chrysler_jeep_rate4_enabled = false;
+  chrysler_long_diagnostic_enabled = false;
   chrysler_long_stock_collision = false;
   chrysler_long_speed_seen = false;
   chrysler_long_gas_seen = false;
@@ -581,6 +740,8 @@ static safety_config chrysler_init(uint16_t param) {
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_RATE4);
     chrysler_long_shadow_enabled =
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_SHADOW);
+    chrysler_long_diagnostic_enabled =
+      GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_DIAGNOSTIC);
     if (chrysler_long_shadow_enabled) {
       ret = BUILD_SAFETY_CFG(chrysler_rx_checks,
                              CHRYSLER_LONG_SHADOW_TX_MSGS);

@@ -329,12 +329,77 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       )),
     )
 
-  def _reset_long_shadow(self):
+  def _reset_long_shadow(self, diagnostic=False):
+    param = Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW
+    if diagnostic:
+      param |= Panda.FLAG_CHRYSLER_JEEP_LONG_DIAGNOSTIC
     self.safety.set_safety_hooks(
       Panda.SAFETY_CHRYSLER,
-      Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW,
+      param,
     )
     self.safety.init_tests()
+
+  @staticmethod
+  def _reject_diagnostic(msg):
+    detail = (
+      int(msg.data[2])
+      | (int(msg.data[3]) << 8)
+      | (int(msg.data[4]) << 16)
+      | (int(msg.data[5]) << 24)
+    )
+    return int(msg.data[0]), int(msg.data[1]), detail
+
+  def test_reject_diagnostics_are_opt_in_and_do_not_change_acceptance(self):
+    self._reset_long_shadow()
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 1_000_000), (True, True, True))
+    untagged = self._private_brake_msg(1)
+    self.safety.set_timer(1_010_000)
+    self.assertFalse(self._tx(untagged))
+    self.assertEqual((int(untagged.data[0]), int(untagged.data[1])), (0, 0))
+
+    self._reset_long_shadow(diagnostic=True)
+    self.safety.set_timer(2_000_000)
+    self._enable_safe_source()
+    accepted = self._private_brake_msg(0)
+    self.assertTrue(self._tx(accepted))
+    self.assertEqual(int(accepted.data[0]), 0)
+
+  def test_reject_diagnostic_exposes_hidden_longitudinal_state(self):
+    self._reset_long_shadow(diagnostic=True)
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.safety.set_controls_allowed(True)
+
+    msg = self._private_brake_msg(0)
+    self.assertFalse(self._tx(msg))
+    self.assertEqual(self._reject_diagnostic(msg), (0xD7, 5, 0))
+
+  def test_reject_diagnostic_exposes_panda_interval(self):
+    self._reset_long_shadow(diagnostic=True)
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 1_000_000), (True, True, True))
+
+    msg = self._private_brake_msg(1)
+    self.safety.set_timer(1_010_000)
+    self.assertFalse(self._tx(msg))
+    self.assertEqual(self._reject_diagnostic(msg), (0xD7, 22, 10_000))
+
+  def test_reject_diagnostic_exposes_counter_mismatch(self):
+    self._reset_long_shadow(diagnostic=True)
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source()
+    self.assertEqual(self._tx_private_cycle(0, 1_000_000), (True, True, True))
+
+    msg = self._private_brake_msg(2)
+    self.safety.set_timer(1_020_000)
+    self.assertFalse(self._tx(msg))
+    self.assertEqual(self._reject_diagnostic(msg), (0xD7, 23, 0x102))
 
   def test_private_frames_blocked_without_shadow_param(self):
     self.safety.set_safety_hooks(Panda.SAFETY_CHRYSLER, 0)
