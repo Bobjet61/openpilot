@@ -15,6 +15,20 @@ class CarInterface(CarInterfaceBase):
   def __init__(self, CP, CarController, CarState):
     super().__init__(CP, CarController, CarState)
     self.buttonStatesPrev = BUTTON_STATES.copy()
+    # This parser is updated separately and is intentionally not registered in
+    # self.can_parsers, so missing radar traffic cannot affect canValid.
+    self.jeep_radar_shadow_cp = (
+      self.CS.get_jeep_radar_shadow_can_parser(CP)
+    )
+
+  def update(self, c, can_strings):
+    if self.jeep_radar_shadow_cp is not None:
+      updated_messages = self.jeep_radar_shadow_cp.update_strings(can_strings)
+      self.CS.update_jeep_radar_shadow(
+        self.jeep_radar_shadow_cp,
+        updated_messages,
+      )
+    return super().update(c, can_strings)
 
   @staticmethod
   def _get_params(ret, candidate, fingerprint, car_fw, experimental_long, docs):

@@ -36,6 +36,17 @@ connector, or any vehicle wiring.
 - A `Jeep long shadow` diagnostic is recorded approximately once per second
   when the Chrysler Advanced White Panda flag is present.
 - Every diagnostic reports `transport=False` and `host_enabled=False`.
+- A separate `Jeep radar shadow` diagnostic passively reads the stock bus-1
+  radar stream. It does not publish `RadarData` or alter `radarState`.
+- The radar shadow compares only longitudinal range and relative speed with
+  the existing vision-only lead. The unvalidated radar lateral field is
+  ignored, and missing, oncoming, weak, or ambiguous matches abstain.
+- `radarUnavailable=True` remains unchanged, and the diagnostic parser is kept
+  outside the parser list used to calculate `canValid`.
+- A `Jeep steer shadow` diagnostic records requested, limited, and applied
+  LKAS torque, measured EPS and driver torque, rate/error limiting, full-limit
+  duration, steering-required warnings, and EPS faults. It does not change the
+  existing 261-count steering ceiling or any steering command.
 
 ## Passive collection
 
@@ -68,6 +79,11 @@ Analyze the rlog before making another change:
    shadow envelope ineligible and return its limited acceleration to zero.
 5. Record any missing diagnostics, logging gaps, CAN faults, or behavioral
    change as a failed passive test.
+6. Summarize the `Jeep radar shadow` selection and abstention reasons. These
+   diagnostics are evidence for offline association work only; they are not a
+   planner input and do not validate the radar lateral field.
+7. Summarize `Jeep steer shadow` full-limit, rate-limited, error-limited,
+   warning, and fault counts before considering any steering-authority change.
 
 Passing this procedure supports only the shadow calculation and logging path.
 It does not authorize enabling transport, flashing experimental Panda firmware,

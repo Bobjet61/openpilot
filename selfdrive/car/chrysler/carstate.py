@@ -3,7 +3,12 @@ from openpilot.common.conversions import Conversions as CV
 from opendbc.can.parser import CANParser
 from opendbc.can.can_define import CANDefine
 from openpilot.selfdrive.car.interfaces import CarStateBase
-from openpilot.selfdrive.car.chrysler.values import DBC, STEER_THRESHOLD, RAM_CARS, BUTTON_STATES
+from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import (
+  JeepRadarShadow,
+  RADAR_MSGS_C,
+  RADAR_MSGS_D,
+)
+from openpilot.selfdrive.car.chrysler.values import CAR, DBC, STEER_THRESHOLD, RAM_CARS, BUTTON_STATES
 
 
 class CarState(CarStateBase):
@@ -36,6 +41,7 @@ class CarState(CarStateBase):
 
     self.buttonStates = BUTTON_STATES.copy()
     self.buttonStatesPrev = BUTTON_STATES.copy()
+    self.jeep_radar_shadow = JeepRadarShadow()
 
   def update(self, cp, cp_cam):
 
@@ -195,3 +201,23 @@ class CarState(CarStateBase):
       messages.append(("LKAS_HEARTBIT", 10))
 
     return CANParser(DBC[CP.carFingerprint]["pt"], messages, 2)
+
+  @staticmethod
+  def get_jeep_radar_shadow_can_parser(CP):
+    if CP.carFingerprint not in (
+        CAR.JEEP_GRAND_CHEROKEE,
+        CAR.JEEP_GRAND_CHEROKEE_2019,
+    ):
+      return None
+
+    radar_dbc = DBC[CP.carFingerprint]["radar"]
+    if radar_dbc is None:
+      return None
+
+    # Frequency zero deliberately excludes this diagnostic parser from CAN
+    # health checks. CarInterface also keeps it out of self.can_parsers.
+    messages = [(address, 0) for address in RADAR_MSGS_C + RADAR_MSGS_D]
+    return CANParser(radar_dbc, messages, 1)
+
+  def update_jeep_radar_shadow(self, parser, updated_messages):
+    return self.jeep_radar_shadow.update_can(parser, updated_messages)

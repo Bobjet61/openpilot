@@ -1,4 +1,7 @@
+from collections import Counter
+
 import cereal.messaging as messaging
+from cereal import car
 from common.conversions import Conversions as CV
 from opendbc.can.packer import CANPacker
 from openpilot.common.params import Params
@@ -6,8 +9,10 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
+from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JeepLongitudinalShadow
-from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
+from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringShadow
+from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
 from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
 
@@ -35,9 +40,27 @@ class CarController(CarControllerBase):
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
+    self.jeep_radar_shadow_sm = (
+      messaging.SubMaster(["radarState"])
+      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+    )
+    self.jeep_radar_shadow_last_cycle = 0
+    self.jeep_radar_shadow_selection = None
+    self.jeep_radar_shadow_vision = None
+    self.jeep_radar_shadow_reason_counts = Counter()
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
+    self.jeep_steering_shadow = (
+      JeepSteeringShadow(
+        steer_max=self.params.STEER_MAX,
+        steer_delta_up=self.params.STEER_DELTA_UP,
+        steer_delta_down=self.params.STEER_DELTA_DOWN,
+        steer_error_max=self.params.STEER_ERROR_MAX,
+        driver_threshold=STEER_THRESHOLD,
+      )
+      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+    )
 
     self.sm = messaging.SubMaster(['longitudinalPlanSP'])
     self.param_s = Params()
@@ -90,6 +113,7 @@ class CarController(CarControllerBase):
       self.v_cruise_min = FCA_V_CRUISE_MIN[self.is_metric] * (CV.KPH_TO_MPH if not self.is_metric else 1)
 
     can_sends = []
+    self.update_jeep_radar_shadow(CS)
 
     if not self.CP.pcmCruiseSpeed:
       if not self.last_speed_limit_sign_tap_prev and self.last_speed_limit_sign_tap:
@@ -134,6 +158,8 @@ class CarController(CarControllerBase):
         f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )
+      self.log_jeep_radar_shadow(CS)
+      self.log_jeep_steering_shadow()
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
       can_sends.append(chryslercan.create_lkas_heartbit(self.packer, CS.lkas_disabled, CS.lkas_heartbit))
@@ -214,10 +240,39 @@ class CarController(CarControllerBase):
         self.last_lkas_falling_edge = self.frame
 
       # steer torque
+      previous_apply_steer = self.apply_steer_last
       new_steer = int(round(CC.actuators.steer * self.params.STEER_MAX))
-      apply_steer = apply_meas_steer_torque_limits(new_steer, self.apply_steer_last, CS.out.steeringTorqueEps, self.params)
-      if not lkas_active or not lkas_control_bit or not self.lkas_control_bit_prev:
+      limited_steer = apply_meas_steer_torque_limits(
+        new_steer,
+        previous_apply_steer,
+        CS.out.steeringTorqueEps,
+        self.params,
+      )
+      control_allowed = (
+        lkas_active
+        and lkas_control_bit
+        and self.lkas_control_bit_prev
+      )
+      apply_steer = limited_steer
+      if not control_allowed:
         apply_steer = 0
+      if self.jeep_steering_shadow is not None:
+        self.jeep_steering_shadow.update(
+          requested_normalized=CC.actuators.steer,
+          requested_raw=new_steer,
+          limited_raw=limited_steer,
+          applied_raw=apply_steer,
+          previous_applied_raw=previous_apply_steer,
+          eps_torque=CS.out.steeringTorqueEps,
+          driver_torque=CS.out.steeringTorque,
+          control_allowed=control_allowed,
+          steer_required=(
+            CC.hudControl.visualAlert
+            == car.CarControl.HUDControl.VisualAlert.steerRequired
+          ),
+          temporary_fault=CS.out.steerFaultTemporary,
+          permanent_fault=CS.out.steerFaultPermanent,
+        )
       self.apply_steer_last = apply_steer
       self.lkas_control_bit_prev = lkas_control_bit
 
@@ -233,6 +288,115 @@ class CarController(CarControllerBase):
     new_actuators.steerOutputCan = self.apply_steer_last
 
     return new_actuators, can_sends
+
+  def update_jeep_radar_shadow(self, CS):
+    if self.jeep_radar_shadow_sm is None:
+      return
+
+    self.jeep_radar_shadow_sm.update(0)
+    radar_shadow = CS.jeep_radar_shadow
+    if radar_shadow.cycle_count == self.jeep_radar_shadow_last_cycle:
+      return
+    self.jeep_radar_shadow_last_cycle = radar_shadow.cycle_count
+
+    radar_state_valid = (
+      self.jeep_radar_shadow_sm.seen["radarState"]
+      and self.jeep_radar_shadow_sm.valid["radarState"]
+    )
+    if radar_state_valid:
+      lead = self.jeep_radar_shadow_sm["radarState"].leadOne
+      vision = JeepVisionLead(
+        status=lead.status,
+        d_rel=lead.dRel,
+        v_rel=lead.vRel,
+        model_prob=lead.modelProb,
+        radar=lead.radar,
+      )
+    else:
+      vision = JeepVisionLead(
+        status=False,
+        d_rel=0.0,
+        v_rel=0.0,
+        model_prob=0.0,
+      )
+
+    selection = radar_shadow.select(vision, CS.out.vEgo)
+    self.jeep_radar_shadow_selection = selection
+    self.jeep_radar_shadow_vision = vision
+    self.jeep_radar_shadow_reason_counts[selection.reason] += 1
+
+  def log_jeep_radar_shadow(self, CS):
+    selection = self.jeep_radar_shadow_selection
+    vision = self.jeep_radar_shadow_vision
+    radar_shadow = CS.jeep_radar_shadow
+    reason_counts = ",".join(
+      f"{reason}:{count}"
+      for reason, count in sorted(
+        self.jeep_radar_shadow_reason_counts.items(),
+      )
+    ) or "none"
+
+    if selection is None or vision is None:
+      last_result = "not_evaluated"
+    elif selection.track is None:
+      score = (
+        "none" if selection.score is None
+        else f"{selection.score:.3f}"
+      )
+      last_result = (
+        f"{selection.reason},score={score},"
+        f"vision_d={vision.d_rel:.2f},vision_v={vision.v_rel:.2f},"
+        f"prob={vision.model_prob:.3f}"
+      )
+    else:
+      last_result = (
+        f"selected,track={selection.track.index},"
+        f"score={selection.score:.3f},"
+        f"radar_d={selection.track.d_rel:.2f},"
+        f"radar_v={selection.track.v_rel:.2f},"
+        f"vision_d={vision.d_rel:.2f},vision_v={vision.v_rel:.2f},"
+        f"prob={vision.model_prob:.3f}"
+      )
+
+    cloudlog.info(
+      f"Jeep radar shadow: cycles={radar_shadow.cycle_count},"
+      f"complete={radar_shadow.complete_cycle_count},"
+      f"tracks={len(radar_shadow.tracks)},"
+      f"window={reason_counts},last={last_result}"
+    )
+    self.jeep_radar_shadow_reason_counts.clear()
+
+  def log_jeep_steering_shadow(self):
+    if self.jeep_steering_shadow is None:
+      return
+
+    window = self.jeep_steering_shadow.snapshot()
+    cloudlog.info(
+      f"Jeep steer shadow: samples={window.samples},"
+      f"active={window.active_samples},"
+      f"request_near_full={window.request_near_full_samples},"
+      f"request_at_261={window.request_at_ceiling_samples},"
+      f"applied_at_261={window.applied_at_ceiling_samples},"
+      f"error_limited={window.error_limited_samples},"
+      f"rate_limited={window.rate_limited_samples},"
+      f"suppressed={window.suppressed_samples},"
+      f"driver_override={window.driver_override_samples},"
+      f"eps_over_261={window.eps_over_limit_samples},"
+      f"steer_required={window.steer_required_samples},"
+      f"temporary_fault={window.temporary_fault_samples},"
+      f"permanent_fault={window.permanent_fault_samples},"
+      f"limiter_mismatch={window.limiter_mismatch_samples},"
+      f"max_request_norm={window.max_requested_normalized:.3f},"
+      f"max_request_raw={window.max_requested_raw},"
+      f"max_limited_raw={window.max_limited_raw},"
+      f"max_applied_raw={window.max_applied_raw},"
+      f"max_eps={window.max_eps_torque:.1f},"
+      f"max_driver={window.max_driver_torque:.1f},"
+      f"max_request_limited_gap={window.max_request_limited_gap},"
+      f"max_request_applied_gap={window.max_request_applied_gap},"
+      f"longest_request_261_ms={window.longest_request_ceiling_ms},"
+      f"longest_applied_261_ms={window.longest_applied_ceiling_ms}"
+    )
 
   def brake_hold(self, CC, CS, can_sends):
     """Maintain stock ACC braking after the Jeep's stop-and-go timeout."""
