@@ -29,6 +29,13 @@ class TestJeepSteeringShadow(unittest.TestCase):
       steer_error_max=80,
       driver_threshold=120,
     )
+    self.rate4_shadow = SHADOW.JeepSteeringRateCandidateShadow(
+      steer_max=261,
+      candidate_delta_up=4,
+      candidate_delta_down=4,
+      steer_error_max=80,
+      installed_delta_limit=3,
+    )
 
   def update(self, **overrides):
     values = {
@@ -169,6 +176,56 @@ class TestJeepSteeringShadow(unittest.TestCase):
     self.assertEqual(window.samples, 1)
     self.assertEqual(window.max_eps_torque, 0.0)
 
+  def test_rate4_candidate_is_faster_but_not_panda_compatible(self):
+    for installed in (3, 6, 9):
+      candidate = self.rate4_shadow.update(
+        requested_raw=100,
+        installed_applied_raw=installed,
+        eps_torque=100.0,
+        control_allowed=True,
+      )
+    self.assertEqual(candidate, 12)
+    window = self.rate4_shadow.snapshot()
+    self.assertEqual(window.samples, 3)
+    self.assertEqual(window.active_samples, 3)
+    self.assertEqual(window.improved_samples, 3)
+    self.assertEqual(window.worse_samples, 0)
+    self.assertEqual(
+      window.current_panda_rate_violation_samples,
+      3,
+    )
+    self.assertEqual(window.max_candidate_delta, 4)
+    self.assertLess(
+      window.mean_candidate_request_gap,
+      window.mean_current_request_gap,
+    )
+
+  def test_rate4_candidate_resets_when_control_is_disabled(self):
+    self.rate4_shadow.update(
+      requested_raw=100,
+      installed_applied_raw=3,
+      eps_torque=100.0,
+      control_allowed=True,
+    )
+    candidate = self.rate4_shadow.update(
+      requested_raw=100,
+      installed_applied_raw=0,
+      eps_torque=100.0,
+      control_allowed=False,
+    )
+    self.assertEqual(candidate, 0)
+    self.assertEqual(self.rate4_shadow.candidate_applied_last, 0)
+
+  def test_rate4_window_resets_after_snapshot(self):
+    self.rate4_shadow.update(
+      requested_raw=100,
+      installed_applied_raw=3,
+      eps_torque=100.0,
+      control_allowed=True,
+    )
+    self.assertEqual(self.rate4_shadow.snapshot().samples, 1)
+    self.assertEqual(self.rate4_shadow.snapshot().samples, 0)
+
   def test_diagnostic_has_no_output_path_and_limit_is_unchanged(self):
     shadow_source = SHADOW_PATH.read_text(encoding="utf-8")
     for forbidden in (
@@ -182,6 +239,18 @@ class TestJeepSteeringShadow(unittest.TestCase):
 
     values_source = VALUES_PATH.read_text(encoding="utf-8")
     self.assertIn("self.STEER_MAX = 261", values_source)
+    self.assertIn("self.STEER_DELTA_UP = 3", values_source)
+    self.assertIn("self.STEER_DELTA_DOWN = 3", values_source)
+
+    controller_source = CONTROLLER_PATH.read_text(encoding="utf-8")
+    self.assertIn(
+      "self.jeep_steering_rate4_shadow.update(",
+      controller_source,
+    )
+    self.assertNotIn(
+      "apply_steer = self.jeep_steering_rate4_shadow",
+      controller_source,
+    )
 
     controller_tree = ast.parse(
       CONTROLLER_PATH.read_text(encoding="utf-8"),
@@ -203,6 +272,26 @@ class TestJeepSteeringShadow(unittest.TestCase):
     self.assertTrue(
       {"can_sends", "new_actuators", "apply_steer"}.isdisjoint(
         referenced_names,
+      ),
+    )
+
+    rate4_logging_methods = [
+      node
+      for node in ast.walk(controller_tree)
+      if (
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "log_jeep_steering_rate4_shadow"
+      )
+    ]
+    self.assertEqual(len(rate4_logging_methods), 1)
+    rate4_referenced_names = {
+      node.id
+      for node in ast.walk(rate4_logging_methods[0])
+      if isinstance(node, ast.Name)
+    }
+    self.assertTrue(
+      {"can_sends", "new_actuators", "apply_steer"}.isdisjoint(
+        rate4_referenced_names,
       ),
     )
 

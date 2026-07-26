@@ -11,7 +11,8 @@ from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JeepLongitudinalShadow
-from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringShadow
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
+from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
 from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
@@ -40,6 +41,15 @@ class CarController(CarControllerBase):
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
+    self.jeep_long_plan_sm = (
+      messaging.SubMaster(["longitudinalPlan"])
+      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+    )
+    self.jeep_long_plan_shadow = (
+      JeepLongitudinalPlanShadow(CP)
+      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+    )
+    self.jeep_long_plan_result = None
     self.jeep_radar_shadow_sm = (
       messaging.SubMaster(["radarState"])
       if CP.carFingerprint in BRAKE_HOLD_CARS else None
@@ -58,6 +68,16 @@ class CarController(CarControllerBase):
         steer_delta_down=self.params.STEER_DELTA_DOWN,
         steer_error_max=self.params.STEER_ERROR_MAX,
         driver_threshold=STEER_THRESHOLD,
+      )
+      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+    )
+    self.jeep_steering_rate4_shadow = (
+      JeepSteeringRateCandidateShadow(
+        steer_max=self.params.STEER_MAX,
+        candidate_delta_up=4,
+        candidate_delta_down=4,
+        steer_error_max=self.params.STEER_ERROR_MAX,
+        installed_delta_limit=self.params.STEER_DELTA_UP,
       )
       if CP.carFingerprint in BRAKE_HOLD_CARS else None
     )
@@ -129,19 +149,28 @@ class CarController(CarControllerBase):
       self.slc_active_stock = slc_active
 
     lkas_active = CC.latActive and CS.madsEnabled
-    jeep_long_eligible = (
-      self.CP.carFingerprint in BRAKE_HOLD_CARS and
-      bool(self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20) and
-      CC.enabled and
-      CS.out.gearShifter in FORWARD_GEARS and
-      CS.out.cruiseState.available and
-      not CS.out.accFaulted and
-      not CS.out.brakePressed and
-      not CS.out.gasPressed and
-      not CS.out.stockAeb
+    jeep_long_vehicle_eligible, jeep_long_vehicle_reason = (
+      self.jeep_long_vehicle_eligibility(CC, CS)
+    )
+    self.update_jeep_long_plan_shadow(
+      CS,
+      now_nanos,
+      jeep_long_vehicle_eligible,
+      jeep_long_vehicle_reason,
     )
     if self.frame % 2 == 0:
-      self.jeep_long_envelope = self.jeep_long_shadow.update(CC.actuators.accel, jeep_long_eligible)
+      requested_accel = (
+        self.jeep_long_plan_result.controller_accel_mps2
+        if self.jeep_long_plan_result is not None else 0.0
+      )
+      plan_eligible = (
+        self.jeep_long_plan_result.eligible
+        if self.jeep_long_plan_result is not None else False
+      )
+      self.jeep_long_envelope = self.jeep_long_shadow.update(
+        requested_accel,
+        plan_eligible,
+      )
       self.jeep_long_shadow_frames = chryslercan.create_wp_long_shadow_messages(
         self.packer, self.jeep_long_envelope, self.frame // 2)
       if self.jeep_long_envelope.transport_enabled:
@@ -158,8 +187,10 @@ class CarController(CarControllerBase):
         f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )
+      self.log_jeep_long_plan_shadow(CS)
       self.log_jeep_radar_shadow(CS)
       self.log_jeep_steering_shadow()
+      self.log_jeep_steering_rate4_shadow()
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
       can_sends.append(chryslercan.create_lkas_heartbit(self.packer, CS.lkas_disabled, CS.lkas_heartbit))
@@ -273,6 +304,13 @@ class CarController(CarControllerBase):
           temporary_fault=CS.out.steerFaultTemporary,
           permanent_fault=CS.out.steerFaultPermanent,
         )
+      if self.jeep_steering_rate4_shadow is not None:
+        self.jeep_steering_rate4_shadow.update(
+          requested_raw=new_steer,
+          installed_applied_raw=apply_steer,
+          eps_torque=CS.out.steeringTorqueEps,
+          control_allowed=control_allowed,
+        )
       self.apply_steer_last = apply_steer
       self.lkas_control_bit_prev = lkas_control_bit
 
@@ -288,6 +326,65 @@ class CarController(CarControllerBase):
     new_actuators.steerOutputCan = self.apply_steer_last
 
     return new_actuators, can_sends
+
+  def jeep_long_vehicle_eligibility(self, CC, CS):
+    if self.CP.carFingerprint not in BRAKE_HOLD_CARS:
+      return False, "unsupported_vehicle"
+    if not self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
+      return False, "white_panda_flag_missing"
+    if not CC.enabled:
+      return False, "controls_disabled"
+    if CS.out.gearShifter not in FORWARD_GEARS:
+      return False, "gear"
+    if not CS.out.cruiseState.available:
+      return False, "cruise_unavailable"
+    if not CS.out.cruiseState.enabled:
+      return False, "stock_acc_inactive"
+    if CS.out.accFaulted:
+      return False, "acc_fault"
+    if CS.out.brakePressed:
+      return False, "brake_pressed"
+    if CS.out.gasPressed:
+      return False, "gas_pressed"
+    if CS.out.stockAeb:
+      return False, "stock_aeb"
+    return True, "eligible"
+
+  def update_jeep_long_plan_shadow(
+      self,
+      CS,
+      now_nanos,
+      vehicle_eligible,
+      vehicle_reason,
+  ):
+    if (
+        self.jeep_long_plan_sm is None
+        or self.jeep_long_plan_shadow is None
+    ):
+      return
+
+    self.jeep_long_plan_sm.update(0)
+    seen = self.jeep_long_plan_sm.seen["longitudinalPlan"]
+    service_valid = (
+      seen and self.jeep_long_plan_sm.valid["longitudinalPlan"]
+    )
+    plan_mono_time = self.jeep_long_plan_sm.logMonoTime[
+      "longitudinalPlan"
+    ]
+    plan_age_s = (
+      (now_nanos - plan_mono_time) / 1e9
+      if seen else float("inf")
+    )
+    self.jeep_long_plan_result = self.jeep_long_plan_shadow.update(
+      plan=self.jeep_long_plan_sm["longitudinalPlan"],
+      car_state=CS.out,
+      seen=seen,
+      service_valid=service_valid,
+      plan_age_s=plan_age_s,
+      vehicle_eligible=vehicle_eligible,
+      vehicle_reason=vehicle_reason,
+      radar_selection=self.jeep_radar_shadow_selection,
+    )
 
   def update_jeep_radar_shadow(self, CS):
     if self.jeep_radar_shadow_sm is None:
@@ -324,6 +421,44 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_selection = selection
     self.jeep_radar_shadow_vision = vision
     self.jeep_radar_shadow_reason_counts[selection.reason] += 1
+
+  def log_jeep_long_plan_shadow(self, CS):
+    if (
+        self.jeep_long_plan_shadow is None
+        or self.jeep_long_plan_result is None
+    ):
+      return
+
+    result = self.jeep_long_plan_result
+    window = self.jeep_long_plan_shadow.snapshot()
+    cloudlog.info(
+      f"Jeep long plan shadow: samples={window.samples},"
+      f"plan_valid={window.plan_valid_samples},"
+      f"eligible={window.eligible_samples},"
+      f"lead={window.lead_samples},"
+      f"radar_supported={window.radar_supported_samples},"
+      f"lead_confirmed={window.lead_confirmed_samples},"
+      f"lead_unconfirmed={window.lead_unconfirmed_samples},"
+      f"radar_only={window.radar_only_samples},"
+      f"fcw={window.fcw_samples},"
+      f"brake_request={window.brake_request_samples},"
+      f"engine_request={window.engine_request_samples},"
+      f"max_brake={window.max_brake_mps2:.3f},"
+      f"max_accel={window.max_accel_mps2:.3f},"
+      f"last_reason={result.reason},"
+      f"source={result.source},"
+      f"lead_state={result.lead_state},"
+      f"plan_age={result.plan_age_s:.3f},"
+      f"target_v={result.target_speed_mps:.3f},"
+      f"target_a={result.target_accel_mps2:.3f},"
+      f"controller_a={result.controller_accel_mps2:.3f},"
+      f"control_state={result.control_state},"
+      f"a_ego={CS.out.aEgo:.3f},"
+      f"radar_d={result.radar_d_rel:.2f},"
+      f"radar_v={result.radar_v_rel:.2f},"
+      f"transport={self.jeep_long_envelope.transport_enabled},"
+      f"host_enabled={self.jeep_long_envelope.host_enabled}"
+    )
 
   def log_jeep_radar_shadow(self, CS):
     selection = self.jeep_radar_shadow_selection
@@ -396,6 +531,30 @@ class CarController(CarControllerBase):
       f"max_request_applied_gap={window.max_request_applied_gap},"
       f"longest_request_261_ms={window.longest_request_ceiling_ms},"
       f"longest_applied_261_ms={window.longest_applied_ceiling_ms}"
+    )
+
+  def log_jeep_steering_rate4_shadow(self):
+    if self.jeep_steering_rate4_shadow is None:
+      return
+
+    window = self.jeep_steering_rate4_shadow.snapshot()
+    cloudlog.info(
+      f"Jeep steer rate4 shadow: samples={window.samples},"
+      f"active={window.active_samples},"
+      f"changed={window.changed_samples},"
+      f"improved={window.improved_samples},"
+      f"worse={window.worse_samples},"
+      f"equal={window.equal_samples},"
+      f"panda_rate_violation="
+      f"{window.current_panda_rate_violation_samples},"
+      f"candidate_at_261={window.candidate_ceiling_samples},"
+      f"max_candidate={window.max_candidate_raw},"
+      f"max_delta={window.max_candidate_delta},"
+      f"max_divergence={window.max_candidate_divergence},"
+      f"mean_gap_rate3={window.mean_current_request_gap:.3f},"
+      f"mean_gap_rate4={window.mean_candidate_request_gap:.3f},"
+      f"applied_rate=3,candidate_rate=4,"
+      f"candidate_applied=False"
     )
 
   def brake_hold(self, CC, CS, can_sends):

@@ -5,6 +5,10 @@ import unittest
 from unittest.mock import patch
 
 LONG_PATH = Path(__file__).resolve().parents[1] / "jeep_longitudinal.py"
+PLANNER_PATH = (
+  Path(__file__).resolve().parents[1]
+  / "jeep_longitudinal_planner_shadow.py"
+)
 CARCONTROLLER_PATH = Path(__file__).resolve().parents[1] / "carcontroller.py"
 INTERFACE_PATH = Path(__file__).resolve().parents[1] / "interface.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
@@ -53,6 +57,20 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED",
       interface_source,
     )
+
+    planner_source = PLANNER_PATH.read_text(encoding="utf-8")
+    self.assertIn(
+      "controller_accel_mps2=controller_accel",
+      planner_source,
+    )
+    for forbidden in (
+      "CANPacker(",
+      "PubMaster(",
+      "sendcan.",
+      "can_sends.append",
+      "can_sends.extend",
+    ):
+      self.assertNotIn(forbidden, planner_source)
 
   def test_transport_and_actuation_are_independent_fail_closed_gates(self):
     with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):

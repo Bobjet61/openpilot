@@ -7,9 +7,15 @@ while the Jeep's stock ACC remains in control. It is not a longitudinal
 actuation test.
 
 The `b8l` host branch is based on `b7bm2`, so it retains the existing lateral
-changes. It computes, rate-limits, packs, and logs candidate Jeep longitudinal
-messages in memory. The committed branch does not append those private frames
-to `can_sends`.
+changes. It reads the existing openpilot longitudinal plan, runs the production
+`LongControl` state machine, computes, rate-limits, packs, and logs candidate
+Jeep longitudinal messages in memory. The branch does not append those private
+frames to `can_sends`.
+
+The same build also compares the installed 261-count, 3-count-per-command
+steering limiter with a 261-count, 4-count-per-command candidate in memory. The
+candidate is never assigned to `apply_steer`, and both Panda safety layers
+remain configured for the installed 3-count rate.
 
 ## Required hard-off state
 
@@ -31,11 +37,16 @@ connector, or any vehicle wiring.
 
 - Stock ACC remains responsible for propulsion and braking.
 - Experimental Mode remains unavailable for this Jeep.
-- Existing lateral steering behavior remains unchanged from `b7bm2`.
+- Existing lateral steering behavior, including the 261-count ceiling and
+  3-count command rate, remains unchanged from `b7bm2`.
 - Private addresses `0x1F6`, `0x1F7`, and `0x272` never appear on CAN.
 - A `Jeep long shadow` diagnostic is recorded approximately once per second
   when the Chrysler Advanced White Panda flag is present.
 - Every diagnostic reports `transport=False` and `host_enabled=False`.
+- A `Jeep long plan shadow` diagnostic reports plan freshness, production
+  controller acceleration, target speed/acceleration, planner source, passive
+  radar confirmation, and why a sample was ineligible. A sample is eligible
+  only while stock ACC is active and the normal vehicle-state checks pass.
 - A separate `Jeep radar shadow` diagnostic passively reads the stock bus-1
   radar stream. It does not publish `RadarData` or alter `radarState`.
 - The radar shadow compares only longitudinal range and relative speed with
@@ -47,6 +58,11 @@ connector, or any vehicle wiring.
   LKAS torque, measured EPS and driver torque, rate/error limiting, full-limit
   duration, steering-required warnings, and EPS faults. It does not change the
   existing 261-count steering ceiling or any steering command.
+- A `Jeep steer rate4 shadow` diagnostic compares the installed rate-3 output
+  with a rate-4 candidate. `candidate_applied=False` must appear in every
+  diagnostic. `panda_rate_violation` is expected to be nonzero when the faster
+  candidate differs from the installed Panda limit; it is evidence that a
+  host-only rate change cannot be deployed.
 
 ## Passive collection
 
@@ -75,8 +91,9 @@ Analyze the rlog before making another change:
 2. Confirm every shadow diagnostic reports both hard-off fields false.
 3. Compare requested and rate-limited acceleration with stock `DAS_3`
    propulsion/braking fields.
-4. Confirm driver pedals, stock AEB, invalid state, and disengagement make the
-   shadow envelope ineligible and return its limited acceleration to zero.
+4. Confirm stale/invalid plans, inactive stock ACC, driver pedals, stock AEB,
+   invalid state, and disengagement make the shadow envelope ineligible and
+   return its limited acceleration to zero.
 5. Record any missing diagnostics, logging gaps, CAN faults, or behavioral
    change as a failed passive test.
 6. Summarize the `Jeep radar shadow` selection and abstention reasons. These
@@ -84,6 +101,9 @@ Analyze the rlog before making another change:
    planner input and do not validate the radar lateral field.
 7. Summarize `Jeep steer shadow` full-limit, rate-limited, error-limited,
    warning, and fault counts before considering any steering-authority change.
+8. Summarize `Jeep steer rate4 shadow` request-gap improvement, reversals,
+   divergence, and current-Panda rate violations. Confirm the candidate never
+   appears in the applied steering command.
 
 Passing this procedure supports only the shadow calculation and logging path.
 It does not authorize enabling transport, flashing experimental Panda firmware,

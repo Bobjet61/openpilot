@@ -32,6 +32,23 @@ class JeepSteeringWindow:
   longest_applied_ceiling_ms: int
 
 
+@dataclass(frozen=True)
+class JeepSteeringRateCandidateWindow:
+  samples: int
+  active_samples: int
+  changed_samples: int
+  improved_samples: int
+  worse_samples: int
+  equal_samples: int
+  current_panda_rate_violation_samples: int
+  candidate_ceiling_samples: int
+  max_candidate_raw: int
+  max_candidate_delta: int
+  max_candidate_divergence: int
+  mean_current_request_gap: float
+  mean_candidate_request_gap: float
+
+
 def clip(value: float, lower: float, upper: float) -> float:
   return min(max(value, lower), upper)
 
@@ -248,6 +265,164 @@ class JeepSteeringShadow:
       ),
       longest_applied_ceiling_ms=round(
         self.longest_applied_ceiling_samples * 1000 / self.sample_hz,
+      ),
+    )
+    self._reset_window()
+    return window
+
+
+class JeepSteeringRateCandidateShadow:
+  """Compare a faster in-memory slew rate without changing applied steering."""
+
+  def __init__(
+      self,
+      *,
+      steer_max: int,
+      candidate_delta_up: int,
+      candidate_delta_down: int,
+      steer_error_max: int,
+      installed_delta_limit: int,
+  ):
+    self.steer_max = steer_max
+    self.candidate_delta_up = candidate_delta_up
+    self.candidate_delta_down = candidate_delta_down
+    self.steer_error_max = steer_error_max
+    self.installed_delta_limit = installed_delta_limit
+    self.candidate_applied_last = 0
+    self._reset_window()
+
+  def _reset_window(self):
+    self.samples = 0
+    self.active_samples = 0
+    self.changed_samples = 0
+    self.improved_samples = 0
+    self.worse_samples = 0
+    self.equal_samples = 0
+    self.current_panda_rate_violation_samples = 0
+    self.candidate_ceiling_samples = 0
+    self.max_candidate_raw = 0
+    self.max_candidate_delta = 0
+    self.max_candidate_divergence = 0
+    self.current_request_gap_sum = 0
+    self.candidate_request_gap_sum = 0
+
+  def _error_limited_target(
+      self,
+      requested_raw: int,
+      eps_torque: float,
+  ) -> int:
+    if not math.isfinite(eps_torque):
+      eps_torque = 0.0
+    max_allowed = min(
+      max(eps_torque + self.steer_error_max, self.steer_error_max),
+      self.steer_max,
+    )
+    min_allowed = max(
+      min(eps_torque - self.steer_error_max, -self.steer_error_max),
+      -self.steer_max,
+    )
+    return int(round(clip(requested_raw, min_allowed, max_allowed)))
+
+  def _rate_limited_target(
+      self,
+      target: int,
+      previous: int,
+  ) -> int:
+    if previous > 0:
+      lower = max(
+        previous - self.candidate_delta_down,
+        -self.candidate_delta_up,
+      )
+      upper = previous + self.candidate_delta_up
+    else:
+      lower = previous - self.candidate_delta_up
+      upper = min(
+        previous + self.candidate_delta_down,
+        self.candidate_delta_up,
+      )
+    return int(round(clip(target, lower, upper)))
+
+  def update(
+      self,
+      *,
+      requested_raw: int,
+      installed_applied_raw: int,
+      eps_torque: float,
+      control_allowed: bool,
+  ) -> int:
+    previous_candidate = self.candidate_applied_last
+    error_target = self._error_limited_target(
+      requested_raw,
+      eps_torque,
+    )
+    candidate_limited = self._rate_limited_target(
+      error_target,
+      previous_candidate,
+    )
+    candidate_applied = (
+      candidate_limited if control_allowed else 0
+    )
+
+    self.samples += 1
+    self.active_samples += int(control_allowed)
+    self.changed_samples += int(
+      candidate_applied != installed_applied_raw,
+    )
+    if control_allowed:
+      current_gap = abs(requested_raw - installed_applied_raw)
+      candidate_gap = abs(requested_raw - candidate_applied)
+      self.current_request_gap_sum += current_gap
+      self.candidate_request_gap_sum += candidate_gap
+      self.improved_samples += int(candidate_gap < current_gap)
+      self.worse_samples += int(candidate_gap > current_gap)
+      self.equal_samples += int(candidate_gap == current_gap)
+      self.current_panda_rate_violation_samples += int(
+        abs(candidate_applied - previous_candidate)
+        > self.installed_delta_limit
+      )
+
+    self.candidate_ceiling_samples += int(
+      abs(candidate_applied) >= self.steer_max,
+    )
+    self.max_candidate_raw = max(
+      self.max_candidate_raw,
+      abs(candidate_applied),
+    )
+    self.max_candidate_delta = max(
+      self.max_candidate_delta,
+      (
+        abs(candidate_applied - previous_candidate)
+        if control_allowed else 0
+      ),
+    )
+    self.max_candidate_divergence = max(
+      self.max_candidate_divergence,
+      abs(candidate_applied - installed_applied_raw),
+    )
+    self.candidate_applied_last = candidate_applied
+    return candidate_applied
+
+  def snapshot(self) -> JeepSteeringRateCandidateWindow:
+    denominator = max(self.active_samples, 1)
+    window = JeepSteeringRateCandidateWindow(
+      samples=self.samples,
+      active_samples=self.active_samples,
+      changed_samples=self.changed_samples,
+      improved_samples=self.improved_samples,
+      worse_samples=self.worse_samples,
+      equal_samples=self.equal_samples,
+      current_panda_rate_violation_samples=(
+        self.current_panda_rate_violation_samples
+      ),
+      candidate_ceiling_samples=self.candidate_ceiling_samples,
+      max_candidate_raw=self.max_candidate_raw,
+      max_candidate_delta=self.max_candidate_delta,
+      max_candidate_divergence=self.max_candidate_divergence,
+      mean_current_request_gap=(
+        self.current_request_gap_sum / denominator
+      ),
+      mean_candidate_request_gap=(
+        self.candidate_request_gap_sum / denominator
       ),
     )
     self._reset_window()
