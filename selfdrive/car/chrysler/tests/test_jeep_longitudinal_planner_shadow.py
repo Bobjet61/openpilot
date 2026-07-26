@@ -223,10 +223,16 @@ class TestJeepLongitudinalPlanShadow(unittest.TestCase):
       controller_source.count(
         "can_sends.extend(self.jeep_long_shadow_frames)",
       ),
+      0,
+    )
+    self.assertEqual(
+      controller_source.count(
+        "can_sends.extend(self.jeep_long_transport_frames)",
+      ),
       1,
     )
     self.assertIn(
-      "if self.jeep_long_envelope.transport_enabled:",
+      "if transport_counter is not None:",
       controller_source,
     )
 

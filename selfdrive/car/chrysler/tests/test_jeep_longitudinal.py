@@ -24,6 +24,8 @@ ACCEL_MIN = LONG.ACCEL_MIN
 JEEP_LONG_ACTUATION_COMPILED = LONG.JEEP_LONG_ACTUATION_COMPILED
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = LONG.JEEP_LONG_SHADOW_TRANSPORT_COMPILED
 JeepLongitudinalShadow = LONG.JeepLongitudinalShadow
+JeepLongitudinalTransportScheduler = LONG.JeepLongitudinalTransportScheduler
+TRANSPORT_MIN_SEND_INTERVAL_NS = LONG.TRANSPORT_MIN_SEND_INTERVAL_NS
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
@@ -104,7 +106,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
   def test_committed_vehicle_path_keeps_shadow_frames_and_longitudinal_off(self):
     carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
     guarded_transport_append = (
-      "if self.jeep_long_envelope.transport_enabled:\n"
+      "if transport_counter is not None:\n"
       "        self.jeep_long_transport_frames = ("
     )
     self.assertIn(guarded_transport_append, carcontroller_source)
@@ -116,6 +118,14 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertNotIn(
       "can_sends.extend(self.jeep_long_shadow_frames)",
+      carcontroller_source,
+    )
+    self.assertIn(
+      "self.jeep_long_transport_scheduler.next_counter(",
+      carcontroller_source,
+    )
+    self.assertIn(
+      "if CS.out.standstill or CS.out.vEgo <= 0.1:",
       carcontroller_source,
     )
 
@@ -248,6 +258,66 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertTrue(
       all(msg[2][7] == fca_checksum(msg[2])
           for msg in (brake, dash, torque)),
+    )
+
+  def test_transport_scheduler_enforces_margin_and_counts_only_sends(self):
+    scheduler = JeepLongitudinalTransportScheduler()
+    self.assertEqual(scheduler.next_counter(1_000_000_000, True), 0)
+    self.assertIsNone(
+      scheduler.next_counter(
+        1_000_000_000 + TRANSPORT_MIN_SEND_INTERVAL_NS - 1,
+        True,
+      )
+    )
+    self.assertEqual(
+      scheduler.next_counter(
+        1_000_000_000 + TRANSPORT_MIN_SEND_INTERVAL_NS,
+        True,
+      ),
+      1,
+    )
+
+  def test_transport_scheduler_does_not_advance_while_disabled(self):
+    scheduler = JeepLongitudinalTransportScheduler()
+    self.assertIsNone(scheduler.next_counter(1_000_000_000, False))
+    self.assertEqual(scheduler.next_counter(1_100_000_000, True), 0)
+    self.assertIsNone(scheduler.next_counter(1_110_000_000, False))
+    self.assertEqual(scheduler.next_counter(1_200_000_000, True), 1)
+
+  def test_transport_scheduler_wraps_counter(self):
+    scheduler = JeepLongitudinalTransportScheduler()
+    start = 1_000_000_000
+    counters = [
+      scheduler.next_counter(
+        start + index * TRANSPORT_MIN_SEND_INTERVAL_NS,
+        True,
+      )
+      for index in range(18)
+    ]
+    self.assertEqual(counters, list(range(16)) + [0, 1])
+
+  def test_transport_scheduler_absorbs_recorded_jitter_patterns(self):
+    scheduler = JeepLongitudinalTransportScheduler()
+    timestamps_ms = (0, 20, 40, 54, 74, 94, 134, 154)
+    sent = [
+      (timestamp, counter)
+      for timestamp in timestamps_ms
+      if (
+        counter := scheduler.next_counter(
+          1_000_000_000 + timestamp * 1_000_000,
+          True,
+        )
+      ) is not None
+    ]
+    self.assertEqual(
+      sent,
+      [(0, 0), (20, 1), (40, 2), (74, 3), (94, 4), (134, 5), (154, 6)],
+    )
+    self.assertTrue(
+      all(
+        current[0] - previous[0] >= 18
+        for previous, current in zip(sent, sent[1:])
+      )
     )
 
 

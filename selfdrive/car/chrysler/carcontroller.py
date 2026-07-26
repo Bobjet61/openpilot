@@ -10,7 +10,7 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
-from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JeepLongitudinalShadow
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JeepLongitudinalShadow, JeepLongitudinalTransportScheduler
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
@@ -42,6 +42,7 @@ class CarController(CarControllerBase):
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
     self.jeep_long_transport_frames = []
+    self.jeep_long_transport_scheduler = JeepLongitudinalTransportScheduler()
     self.jeep_long_plan_sm = (
       messaging.SubMaster(["longitudinalPlan"])
       if CP.carFingerprint in BRAKE_HOLD_CARS else None
@@ -174,10 +175,14 @@ class CarController(CarControllerBase):
       )
       self.jeep_long_shadow_frames = chryslercan.create_wp_long_shadow_messages(
         self.packer, self.jeep_long_envelope, self.frame // 2)
-      if self.jeep_long_envelope.transport_enabled:
+      transport_counter = self.jeep_long_transport_scheduler.next_counter(
+        now_nanos,
+        self.jeep_long_envelope.transport_enabled,
+      )
+      if transport_counter is not None:
         self.jeep_long_transport_frames = (
           chryslercan.create_wp_long_transport_messages(
-            self.packer, self.frame // 2)
+            self.packer, transport_counter)
         )
         can_sends.extend(self.jeep_long_transport_frames)
       else:
@@ -355,6 +360,8 @@ class CarController(CarControllerBase):
       return False, "gas_pressed"
     if CS.out.stockAeb:
       return False, "stock_aeb"
+    if CS.out.standstill or CS.out.vEgo <= 0.1:
+      return False, "not_moving"
     return True, "eligible"
 
   def update_jeep_long_plan_shadow(

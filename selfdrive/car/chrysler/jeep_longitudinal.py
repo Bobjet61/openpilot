@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 
-# Independent host-to-Panda transport gate. The b8t branch enables only the
+# Independent host-to-Panda transport gate. The b8u branch enables only the
 # private transport path; every transmitted actuator field is hard-coded
 # neutral and OP_LONG_ENABLE remains false.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
@@ -21,6 +21,10 @@ ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
+
+# The embedded Panda rejects private cycles closer than 15 ms. Leave 3 ms of
+# scheduling margin, and advance the counter only for cycles actually sent.
+TRANSPORT_MIN_SEND_INTERVAL_NS = 18_000_000
 
 # Recovered from the Chrysler Advanced implementation. This is logged for
 # calibration only; it is not transmitted by this branch.
@@ -118,3 +122,25 @@ class JeepLongitudinalShadow:
       host_enabled=JEEP_LONG_ACTUATION_COMPILED and transport_enabled,
       eligible=eligible,
     )
+
+
+class JeepLongitudinalTransportScheduler:
+  """Rate gate and counter for the neutral private transport probe."""
+
+  def __init__(self):
+    self.counter = 0
+    self.last_send_nanos: int | None = None
+
+  def next_counter(self, now_nanos: int, enabled: bool) -> int | None:
+    if not enabled:
+      return None
+    if (
+        self.last_send_nanos is not None
+        and now_nanos - self.last_send_nanos < TRANSPORT_MIN_SEND_INTERVAL_NS
+    ):
+      return None
+
+    counter = self.counter
+    self.counter = (self.counter + 1) & 0xF
+    self.last_send_nanos = now_nanos
+    return counter
