@@ -23,11 +23,12 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
   LKAS_ACTIVE_VALUE = 1
 
   DAS_BUS = 0
+  SAFETY_PARAM = 0
 
   def setUp(self):
     self.packer = CANPackerPanda("chrysler_pacifica_2017_hybrid_generated")
     self.safety = libpanda_py.libpanda
-    self.safety.set_safety_hooks(Panda.SAFETY_CHRYSLER, 0)
+    self.safety.set_safety_hooks(Panda.SAFETY_CHRYSLER, self.SAFETY_PARAM)
     self.safety.init_tests()
 
   def _button_msg(self, cancel=False, resume=False):
@@ -126,6 +127,76 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
 
     self._rx(self._user_brake_msg(True))
     self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
+
+
+class TestJeepRate4Limits(unittest.TestCase):
+  """Focused boundary tests for the opt-in Jeep steering envelope."""
+
+  TX_MSGS = None
+
+  def setUp(self):
+    self.packer = CANPackerPanda("chrysler_pacifica_2017_hybrid_generated")
+    self.safety = libpanda_py.libpanda
+
+  def _reset(self, param):
+    self.safety.set_safety_hooks(Panda.SAFETY_CHRYSLER, param)
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(True)
+
+  def _torque_cmd_msg(self, torque):
+    values = {"STEERING_TORQUE": torque, "LKAS_CONTROL_BIT": 1}
+    return self.packer.make_can_msg_panda("LKAS_COMMAND", 0, values)
+
+  def _set_torque_state(self, desired_last, rt_last, measured):
+    self.safety.set_desired_torque_last(desired_last)
+    self.safety.set_rt_torque_last(rt_last)
+    self.safety.set_torque_meas(measured, measured)
+
+  def _tx_from_zero(self, param, torque):
+    self._reset(param)
+    self._set_torque_state(0, 0, 0)
+    return self.safety.safety_tx_hook(self._torque_cmd_msg(torque))
+
+  def test_legacy_rate3_is_unchanged(self):
+    self.assertTrue(self._tx_from_zero(0, 3))
+    self.assertFalse(self._tx_from_zero(0, 4))
+    self.assertTrue(self._tx_from_zero(0, -3))
+    self.assertFalse(self._tx_from_zero(0, -4))
+
+  def test_jeep_rate4_boundary(self):
+    param = Panda.FLAG_CHRYSLER_JEEP_RATE4
+    self.assertTrue(self._tx_from_zero(param, 4))
+    self.assertFalse(self._tx_from_zero(param, 5))
+    self.assertTrue(self._tx_from_zero(param, -4))
+    self.assertFalse(self._tx_from_zero(param, -5))
+
+  def test_rate4_composes_with_long_shadow_flag(self):
+    param = (
+      Panda.FLAG_CHRYSLER_JEEP_RATE4 |
+      Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW
+    )
+    self.assertTrue(self._tx_from_zero(param, 4))
+    self.assertFalse(self._tx_from_zero(param, 5))
+
+  def test_max_torque_remains_261(self):
+    param = Panda.FLAG_CHRYSLER_JEEP_RATE4
+    self._reset(param)
+    self._set_torque_state(261, 261, 261)
+    self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(261)))
+
+    self._reset(param)
+    self._set_torque_state(262, 262, 262)
+    self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(262)))
+
+  def test_realtime_delta_remains_112(self):
+    param = Panda.FLAG_CHRYSLER_JEEP_RATE4
+    self._reset(param)
+    self._set_torque_state(108, 0, 112)
+    self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(112)))
+
+    self._reset(param)
+    self._set_torque_state(109, 0, 113)
+    self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(113)))
 
 
 class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):

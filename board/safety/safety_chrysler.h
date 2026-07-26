@@ -28,6 +28,16 @@ const SteeringLimits CHRYSLER_RAM_HD_STEERING_LIMITS = {
   .type = TorqueMotorLimited,
 };
 
+const SteeringLimits CHRYSLER_JEEP_RATE4_STEERING_LIMITS = {
+  .max_steer = 261,
+  .max_rt_delta = 112,
+  .max_rt_interval = 250000,
+  .max_rate_up = 4,
+  .max_rate_down = 4,
+  .max_torque_error = 80,
+  .type = TorqueMotorLimited,
+};
+
 // Source-review and disconnected-bench gate. This cannot be overridden from
 // the build command. A private dashboard request with OP_LONG_ENABLE=1 is
 // therefore rejected even when the shadow safety parameter is selected.
@@ -166,6 +176,7 @@ RxCheck chrysler_ram_hd_rx_checks[] = {
 const uint32_t CHRYSLER_PARAM_RAM_DT = 1U;  // set for Ram DT platform
 const uint32_t CHRYSLER_PARAM_RAM_HD = 2U;  // set for Ram HD platform
 const uint32_t CHRYSLER_PARAM_JEEP_LONG_SHADOW = 4U;
+const uint32_t CHRYSLER_PARAM_JEEP_RATE4 = 8U;
 
 typedef enum {
   CHRYSLER_RAM_DT,
@@ -177,6 +188,7 @@ const ChryslerAddrs *chrysler_addrs = &CHRYSLER_ADDRS;
 static uint8_t chrysler_das_3_last[8] = {0};
 static bool chrysler_das_3_last_valid = false;
 static bool chrysler_long_shadow_enabled = false;
+static bool chrysler_jeep_rate4_enabled = false;
 static bool chrysler_long_stock_collision = false;
 static bool chrysler_long_speed_seen = false;
 static bool chrysler_long_gas_seen = false;
@@ -486,7 +498,8 @@ static bool chrysler_tx_hook(const CANPacket_t *to_send) {
     int desired_torque = ((GET_BYTE(to_send, start_byte) & 0x7U) << 8) | GET_BYTE(to_send, start_byte + 1);
     desired_torque -= 1024;
 
-    const SteeringLimits limits = (chrysler_platform == CHRYSLER_PACIFICA) ? CHRYSLER_STEERING_LIMITS :
+    const SteeringLimits limits = (chrysler_platform == CHRYSLER_PACIFICA) ?
+                                  (chrysler_jeep_rate4_enabled ? CHRYSLER_JEEP_RATE4_STEERING_LIMITS : CHRYSLER_STEERING_LIMITS) :
                                   (chrysler_platform == CHRYSLER_RAM_DT) ? CHRYSLER_RAM_DT_STEERING_LIMITS : CHRYSLER_RAM_HD_STEERING_LIMITS;
 
     bool steer_req = (chrysler_platform == CHRYSLER_PACIFICA) ? GET_BIT(to_send, 4U) : (GET_BYTE(to_send, 3) & 0x7U) == 2U;
@@ -538,6 +551,7 @@ static safety_config chrysler_init(uint16_t param) {
   safety_config ret;
   chrysler_das_3_last_valid = false;
   chrysler_long_shadow_enabled = false;
+  chrysler_jeep_rate4_enabled = false;
   chrysler_long_stock_collision = false;
   chrysler_long_speed_seen = false;
   chrysler_long_gas_seen = false;
@@ -563,6 +577,8 @@ static safety_config chrysler_init(uint16_t param) {
   } else {
     chrysler_platform = CHRYSLER_PACIFICA;
     chrysler_addrs = &CHRYSLER_ADDRS;
+    chrysler_jeep_rate4_enabled =
+      GET_FLAG(param, CHRYSLER_PARAM_JEEP_RATE4);
     chrysler_long_shadow_enabled =
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_SHADOW);
     if (chrysler_long_shadow_enabled) {
