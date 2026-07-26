@@ -72,6 +72,7 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[0].safetyParam = jeep_long_shadow_safety_param(
         ret.safetyConfigs[0].safetyParam,
         Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW,
+        Panda.FLAG_CHRYSLER_JEEP_LONG_DIAGNOSTIC,
       )
       # Experimental longitudinal stays unavailable while this branch only
       # packs and logs shadow commands.

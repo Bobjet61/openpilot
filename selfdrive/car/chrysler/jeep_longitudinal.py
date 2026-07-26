@@ -1,10 +1,14 @@
 from dataclasses import dataclass
 
 
-# Independent host-to-Panda transport gate. The b8u branch enables only the
+# Independent host-to-Panda transport gate. The b8v branch enables only the
 # private transport path; every transmitted actuator field is hard-coded
 # neutral and OP_LONG_ENABLE remains false.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
+
+# Tags Panda-rejected private frames in their USB rejection receipts. The tag
+# never reaches a vehicle CAN transmit queue and does not change acceptance.
+JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = True
 
 # Independent actuation gate. Enabling this without transport is invalid, and
 # both Panda layers retain their own hard-off actuation gates.
@@ -12,6 +16,11 @@ JEEP_LONG_ACTUATION_COMPILED = False
 
 if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
   raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
+if (
+    JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED
+    and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED
+):
+  raise RuntimeError("Jeep longitudinal diagnostics require shadow transport")
 
 # Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
@@ -77,9 +86,12 @@ def clip(value: float, lower: float, upper: float) -> float:
 def jeep_long_shadow_safety_param(
   safety_param: int,
   shadow_flag: int,
+  diagnostic_flag: int = 0,
 ) -> int:
   if JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
-    return safety_param | shadow_flag
+    safety_param |= shadow_flag
+    if JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED:
+      safety_param |= diagnostic_flag
   return safety_param
 
 

@@ -22,6 +22,9 @@ LONG_SPEC.loader.exec_module(LONG)
 ACCEL_MAX = LONG.ACCEL_MAX
 ACCEL_MIN = LONG.ACCEL_MIN
 JEEP_LONG_ACTUATION_COMPILED = LONG.JEEP_LONG_ACTUATION_COMPILED
+JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = (
+  LONG.JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED
+)
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = LONG.JEEP_LONG_SHADOW_TRANSPORT_COMPILED
 JeepLongitudinalShadow = LONG.JeepLongitudinalShadow
 JeepLongitudinalTransportScheduler = LONG.JeepLongitudinalTransportScheduler
@@ -98,6 +101,7 @@ def load_chryslercan():
 class TestJeepLongitudinalShadow(unittest.TestCase):
   def test_transport_is_on_but_actuation_is_compile_time_off(self):
     self.assertFalse(JEEP_LONG_ACTUATION_COMPILED)
+    self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)
     self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
     self.assertTrue(result.transport_enabled)
@@ -191,6 +195,10 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
   def test_committed_transport_adds_only_shadow_param(self):
     self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
     self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
+    self.assertEqual(jeep_long_shadow_safety_param(0, 4, 16), 20)
+    self.assertEqual(jeep_long_shadow_safety_param(8, 4, 16), 28)
+    with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", False):
+      self.assertEqual(jeep_long_shadow_safety_param(8, 4, 16), 8)
 
   def test_requested_accel_is_clipped(self):
     positive = JeepLongitudinalShadow().update(20.0, eligible=True)
