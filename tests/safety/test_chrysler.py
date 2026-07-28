@@ -170,6 +170,21 @@ class TestJeepRate4Limits(unittest.TestCase):
     self.assertTrue(self._tx_from_zero(param, -4))
     self.assertFalse(self._tx_from_zero(param, -5))
 
+  def test_jeep_rate5_boundary(self):
+    param = Panda.FLAG_CHRYSLER_JEEP_RATE5
+    self.assertTrue(self._tx_from_zero(param, 5))
+    self.assertFalse(self._tx_from_zero(param, 6))
+    self.assertTrue(self._tx_from_zero(param, -5))
+    self.assertFalse(self._tx_from_zero(param, -6))
+
+  def test_conflicting_rate_flags_fall_closed_to_stock_rate3(self):
+    param = (
+      Panda.FLAG_CHRYSLER_JEEP_RATE4 |
+      Panda.FLAG_CHRYSLER_JEEP_RATE5
+    )
+    self.assertTrue(self._tx_from_zero(param, 3))
+    self.assertFalse(self._tx_from_zero(param, 4))
+
   def test_rate4_composes_with_long_shadow_flag(self):
     param = (
       Panda.FLAG_CHRYSLER_JEEP_RATE4 |
@@ -179,24 +194,30 @@ class TestJeepRate4Limits(unittest.TestCase):
     self.assertFalse(self._tx_from_zero(param, 5))
 
   def test_max_torque_remains_261(self):
-    param = Panda.FLAG_CHRYSLER_JEEP_RATE4
-    self._reset(param)
-    self._set_torque_state(261, 261, 261)
-    self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(261)))
+    for param in (
+      Panda.FLAG_CHRYSLER_JEEP_RATE4,
+      Panda.FLAG_CHRYSLER_JEEP_RATE5,
+    ):
+      self._reset(param)
+      self._set_torque_state(261, 261, 261)
+      self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(261)))
 
-    self._reset(param)
-    self._set_torque_state(262, 262, 262)
-    self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(262)))
+      self._reset(param)
+      self._set_torque_state(262, 262, 262)
+      self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(262)))
 
   def test_realtime_delta_remains_112(self):
-    param = Panda.FLAG_CHRYSLER_JEEP_RATE4
-    self._reset(param)
-    self._set_torque_state(108, 0, 112)
-    self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(112)))
+    for param in (
+      Panda.FLAG_CHRYSLER_JEEP_RATE4,
+      Panda.FLAG_CHRYSLER_JEEP_RATE5,
+    ):
+      self._reset(param)
+      self._set_torque_state(108, 0, 112)
+      self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(112)))
 
-    self._reset(param)
-    self._set_torque_state(109, 0, 113)
-    self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(113)))
+      self._reset(param)
+      self._set_torque_state(109, 0, 113)
+      self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(113)))
 
 
 class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
@@ -316,23 +337,25 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
 
   def _tx_private_cycle(self, counter, time_us, decel_raw=4094,
                         command_type=0, torque_raw=2000,
-                        engine_request=False):
+                        engine_request=False, enable=False):
     self.safety.set_timer(time_us)
     return (
       self._tx(self._private_brake_msg(
         counter, decel_raw=decel_raw, command_type=command_type,
       )),
-      self._tx(self._private_dash_msg(counter)),
+      self._tx(self._private_dash_msg(counter, enable=enable)),
       self._tx(self._private_torque_msg(
         counter, torque_raw=torque_raw,
         engine_request=engine_request,
       )),
     )
 
-  def _reset_long_shadow(self, diagnostic=False):
+  def _reset_long_shadow(self, diagnostic=False, actuation=False):
     param = Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW
     if diagnostic:
       param |= Panda.FLAG_CHRYSLER_JEEP_LONG_DIAGNOSTIC
+    if actuation:
+      param |= Panda.FLAG_CHRYSLER_JEEP_LONG_ACTUATION
     self.safety.set_safety_hooks(
       Panda.SAFETY_CHRYSLER,
       param,
@@ -479,13 +502,57 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       (True, True, True),
     )
 
-  def test_private_enable_is_compile_time_blocked(self):
+  def test_private_enable_requires_dedicated_actuation_flag(self):
     self._enable_safe_source()
     self.assertTrue(self._tx(self._private_brake_msg(0)))
     for controls_allowed in (False, True):
       self.safety.set_controls_allowed(controls_allowed)
       self.assertFalse(self._tx(self._private_dash_msg(0, enable=True)))
       self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_private_actuation_flag_accepts_only_enabled_complete_cycles(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1, enable=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        1, 20_000, torque_raw=2310,
+        engine_request=True, enable=True,
+      ),
+      (True, True, True),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._tx(self._private_brake_msg(0)))
+    self.assertFalse(self._tx(self._private_dash_msg(0, enable=False)))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_private_actuation_flag_without_shadow_cannot_transmit(self):
+    self.safety.set_safety_hooks(
+      Panda.SAFETY_CHRYSLER,
+      Panda.FLAG_CHRYSLER_JEEP_LONG_ACTUATION,
+    )
+    self.safety.init_tests()
+    self._enable_safe_source()
+    self.assertFalse(self._tx(self._private_brake_msg(0)))
+    self.assertFalse(self._tx(self._private_dash_msg(0, enable=True)))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_source_change_between_private_stages_aborts_cycle(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._tx(self._private_brake_msg(
+      0, decel_raw=2866, command_type=1,
+    )))
+    self.assertTrue(self._rx(self._user_gas_msg(1)))
+    self.assertFalse(self._tx(self._private_dash_msg(0, enable=True)))
+    self.assertFalse(self._tx(self._private_torque_msg(0)))
 
   def test_private_source_gates_and_freshness(self):
     self.assertFalse(self._tx(self._private_brake_msg(0)))

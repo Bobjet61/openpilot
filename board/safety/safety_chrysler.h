@@ -38,13 +38,15 @@ const SteeringLimits CHRYSLER_JEEP_RATE4_STEERING_LIMITS = {
   .type = TorqueMotorLimited,
 };
 
-// Source-review and disconnected-bench gate. This cannot be overridden from
-// the build command. A private dashboard request with OP_LONG_ENABLE=1 is
-// therefore rejected even when the shadow safety parameter is selected.
-#ifdef CHRYSLER_JEEP_LONG_ACTUATION
-#error "CHRYSLER_JEEP_LONG_ACTUATION must remain hard-coded off"
-#endif
-#define CHRYSLER_JEEP_LONG_ACTUATION 0U
+const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
+  .max_steer = 261,
+  .max_rt_delta = 112,
+  .max_rt_interval = 250000,
+  .max_rate_up = 5,
+  .max_rate_down = 5,
+  .max_torque_error = 80,
+  .type = TorqueMotorLimited,
+};
 
 #define CHRYSLER_LONG_BRAKE_ADDR 0x1F6U
 #define CHRYSLER_LONG_DASH_ADDR 0x1F7U
@@ -178,6 +180,8 @@ const uint32_t CHRYSLER_PARAM_RAM_HD = 2U;  // set for Ram HD platform
 const uint32_t CHRYSLER_PARAM_JEEP_LONG_SHADOW = 4U;
 const uint32_t CHRYSLER_PARAM_JEEP_RATE4 = 8U;
 const uint32_t CHRYSLER_PARAM_JEEP_LONG_DIAGNOSTIC = 16U;
+const uint32_t CHRYSLER_PARAM_JEEP_RATE5 = 32U;
+const uint32_t CHRYSLER_PARAM_JEEP_LONG_ACTUATION = 64U;
 
 typedef enum {
   CHRYSLER_RAM_DT,
@@ -190,7 +194,9 @@ static uint8_t chrysler_das_3_last[8] = {0};
 static bool chrysler_das_3_last_valid = false;
 static bool chrysler_long_shadow_enabled = false;
 static bool chrysler_jeep_rate4_enabled = false;
+static bool chrysler_jeep_rate5_enabled = false;
 static bool chrysler_long_diagnostic_enabled = false;
+static bool chrysler_long_actuation_enabled = false;
 static bool chrysler_long_stock_collision = false;
 static bool chrysler_long_speed_seen = false;
 static bool chrysler_long_gas_seen = false;
@@ -463,16 +469,21 @@ static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
   const bool stage_valid = chrysler_long_stage == 1U;
   const bool counter_valid = counter == chrysler_long_cycle_counter;
   const bool checksum_valid = chrysler_long_checksum_valid(to_send);
+  uint32_t source_detail = 0U;
+  const uint8_t source_reason =
+    chrysler_long_source_reject_reason(&source_detail);
+  const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
     (GET_BYTE(to_send, 1) == 0U) &&
     (GET_BYTE(to_send, 2) == 0U) &&
-    (GET_BYTE(to_send, 3) == CHRYSLER_JEEP_LONG_ACTUATION) &&
+    (GET_BYTE(to_send, 3) ==
+      (chrysler_long_actuation_enabled ? 1U : 0U)) &&
     (GET_BYTE(to_send, 4) == 0U) &&
     (GET_BYTE(to_send, 5) == 0U) &&
     ((GET_BYTE(to_send, 6) & 0xFU) == 0U);
   const bool allowed = shadow_valid && stage_valid && counter_valid &&
-                       checksum_valid && payload_valid;
+                       checksum_valid && source_valid && payload_valid;
 
   if (allowed) {
     chrysler_long_stage = 2U;
@@ -488,6 +499,8 @@ static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
         ((uint32_t)chrysler_long_cycle_counter << 8U) | (uint32_t)counter);
     } else if (!checksum_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_DASH_CHECKSUM, 0U);
+    } else if (!source_valid) {
+      chrysler_long_set_reject(source_reason, source_detail);
     } else if (!payload_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_DASH_PAYLOAD, 0U);
     } else {
@@ -506,6 +519,10 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
   const bool stage_valid = chrysler_long_stage == 2U;
   const bool counter_valid = counter == chrysler_long_cycle_counter;
   const bool checksum_valid = chrysler_long_checksum_valid(to_send);
+  uint32_t source_detail = 0U;
+  const uint8_t source_reason =
+    chrysler_long_source_reject_reason(&source_detail);
+  const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
     (GET_BYTE(to_send, 1) == 0U) &&
@@ -524,7 +541,8 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
     command_valid = torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW;
   }
   const bool allowed = shadow_valid && stage_valid && counter_valid &&
-                       checksum_valid && payload_valid && conflict_valid &&
+                       checksum_valid && source_valid && payload_valid &&
+                       conflict_valid &&
                        command_valid;
 
   if (!allowed) {
@@ -539,6 +557,8 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
         ((uint32_t)chrysler_long_cycle_counter << 8U) | (uint32_t)counter);
     } else if (!checksum_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_CHECKSUM, 0U);
+    } else if (!source_valid) {
+      chrysler_long_set_reject(source_reason, source_detail);
     } else if (!payload_valid || !command_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_PAYLOAD,
                                (uint32_t)torque_raw);
@@ -664,7 +684,11 @@ static bool chrysler_tx_hook(const CANPacket_t *to_send) {
     desired_torque -= 1024;
 
     const SteeringLimits limits = (chrysler_platform == CHRYSLER_PACIFICA) ?
-                                  (chrysler_jeep_rate4_enabled ? CHRYSLER_JEEP_RATE4_STEERING_LIMITS : CHRYSLER_STEERING_LIMITS) :
+                                  (chrysler_jeep_rate5_enabled ?
+                                   CHRYSLER_JEEP_RATE5_STEERING_LIMITS :
+                                   (chrysler_jeep_rate4_enabled ?
+                                    CHRYSLER_JEEP_RATE4_STEERING_LIMITS :
+                                    CHRYSLER_STEERING_LIMITS)) :
                                   (chrysler_platform == CHRYSLER_RAM_DT) ? CHRYSLER_RAM_DT_STEERING_LIMITS : CHRYSLER_RAM_HD_STEERING_LIMITS;
 
     bool steer_req = (chrysler_platform == CHRYSLER_PACIFICA) ? GET_BIT(to_send, 4U) : (GET_BYTE(to_send, 3) & 0x7U) == 2U;
@@ -717,7 +741,9 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_das_3_last_valid = false;
   chrysler_long_shadow_enabled = false;
   chrysler_jeep_rate4_enabled = false;
+  chrysler_jeep_rate5_enabled = false;
   chrysler_long_diagnostic_enabled = false;
+  chrysler_long_actuation_enabled = false;
   chrysler_long_stock_collision = false;
   chrysler_long_speed_seen = false;
   chrysler_long_gas_seen = false;
@@ -743,12 +769,22 @@ static safety_config chrysler_init(uint16_t param) {
   } else {
     chrysler_platform = CHRYSLER_PACIFICA;
     chrysler_addrs = &CHRYSLER_ADDRS;
-    chrysler_jeep_rate4_enabled =
+    const bool jeep_rate4_requested =
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_RATE4);
+    const bool jeep_rate5_requested =
+      GET_FLAG(param, CHRYSLER_PARAM_JEEP_RATE5);
+    // Conflicting response flags fall closed to the stock rate-3 envelope.
+    chrysler_jeep_rate4_enabled =
+      jeep_rate4_requested && !jeep_rate5_requested;
+    chrysler_jeep_rate5_enabled =
+      jeep_rate5_requested && !jeep_rate4_requested;
     chrysler_long_shadow_enabled =
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_SHADOW);
     chrysler_long_diagnostic_enabled =
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_DIAGNOSTIC);
+    chrysler_long_actuation_enabled =
+      chrysler_long_shadow_enabled &&
+      GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_ACTUATION);
     if (chrysler_long_shadow_enabled) {
       ret = BUILD_SAFETY_CFG(chrysler_rx_checks,
                              CHRYSLER_LONG_SHADOW_TX_MSGS);
