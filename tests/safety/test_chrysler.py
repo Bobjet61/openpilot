@@ -193,18 +193,22 @@ class TestJeepRate4Limits(unittest.TestCase):
     self.assertTrue(self._tx_from_zero(param, 4))
     self.assertFalse(self._tx_from_zero(param, 5))
 
-  def test_max_torque_remains_261(self):
-    for param in (
-      Panda.FLAG_CHRYSLER_JEEP_RATE4,
-      Panda.FLAG_CHRYSLER_JEEP_RATE5,
-    ):
-      self._reset(param)
-      self._set_torque_state(261, 261, 261)
-      self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(261)))
+  def test_rate5_max_torque_270_rate4_remains_261(self):
+    self._reset(Panda.FLAG_CHRYSLER_JEEP_RATE4)
+    self._set_torque_state(261, 261, 261)
+    self.assertTrue(self.safety.safety_tx_hook(self._torque_cmd_msg(261)))
 
-      self._reset(param)
-      self._set_torque_state(262, 262, 262)
-      self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(262)))
+    self._reset(Panda.FLAG_CHRYSLER_JEEP_RATE4)
+    self._set_torque_state(262, 262, 262)
+    self.assertFalse(self.safety.safety_tx_hook(self._torque_cmd_msg(262)))
+
+    for torque, allowed in ((270, True), (271, False), (-270, True), (-271, False)):
+      self._reset(Panda.FLAG_CHRYSLER_JEEP_RATE5)
+      self._set_torque_state(torque, torque, torque)
+      self.assertEqual(
+        allowed,
+        self.safety.safety_tx_hook(self._torque_cmd_msg(torque)),
+      )
 
   def test_realtime_delta_remains_112(self):
     for param in (
