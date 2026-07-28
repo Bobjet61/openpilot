@@ -11,8 +11,10 @@ PLANNER_PATH = (
   / "jeep_longitudinal_planner_shadow.py"
 )
 CARCONTROLLER_PATH = Path(__file__).resolve().parents[1] / "carcontroller.py"
+CARSTATE_PATH = Path(__file__).resolve().parents[1] / "carstate.py"
 INTERFACE_PATH = Path(__file__).resolve().parents[1] / "interface.py"
 CHRYSLERCAN_PATH = Path(__file__).resolve().parents[1] / "chryslercan.py"
+CONTROLSD_PATH = Path(__file__).resolve().parents[3] / "controls" / "controlsd.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
 assert LONG_SPEC is not None and LONG_SPEC.loader is not None
 LONG = importlib.util.module_from_spec(LONG_SPEC)
@@ -156,6 +158,47 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "can_sends.extend",
     ):
       self.assertNotIn(forbidden, planner_source)
+
+  def test_legacy_brake_hold_transmit_path_is_removed(self):
+    carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
+    carstate_source = CARSTATE_PATH.read_text(encoding="utf-8")
+    chryslercan_source = CHRYSLERCAN_PATH.read_text(encoding="utf-8")
+    controlsd_source = CONTROLSD_PATH.read_text(encoding="utf-8")
+
+    for forbidden in (
+      "def brake_hold(",
+      "self.brake_hold(",
+      "bh_hold_decel",
+      "bh_last_resume_frame",
+      "last_das_3_counter",
+      "Brake hold:",
+      "BRAKE_HOLD_CARS",
+      "chryslercan.das_3_command(",
+    ):
+      self.assertNotIn(forbidden, carcontroller_source)
+
+    self.assertNotIn("def das_3_command(", chryslercan_source)
+    for forbidden in (
+      "self.brake_hold",
+      "self.cruise_active_actual",
+      "self.forward_gear",
+      "self.acc_decelerating",
+      "self.das_3",
+      "ret.brakeHoldActive",
+    ):
+      self.assertNotIn(forbidden, carstate_source)
+
+    self.assertNotIn("BRAKE_HOLD_DIAG", controlsd_source)
+    self.assertNotIn("CS.brakeHoldActive", controlsd_source)
+    self.assertIn(
+      "cruise_mismatch = CS.cruiseState.enabled and not self.enabled",
+      controlsd_source,
+    )
+    self.assertIn("elif CC.cruiseControl.resume:", carcontroller_source)
+    self.assertIn(
+      "self.CP, resume=True))",
+      carcontroller_source,
+    )
 
   def test_transport_and_actuation_are_independent_fail_closed_gates(self):
     with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):

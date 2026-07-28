@@ -28,11 +28,6 @@ class CarState(CarStateBase):
 
     self.prev_distance_button = 0
     self.distance_button = 0
-    self.brake_hold = False
-    self.cruise_active_actual = False
-    self.forward_gear = False
-    self.acc_decelerating = False
-    self.das_3 = {}
 
     self.lkas_enabled = False
     self.prev_lkas_enabled = False
@@ -108,11 +103,6 @@ class CarState(CarStateBase):
     ret.cruiseState.nonAdaptive = cp_cruise.vl["DAS_4"]["ACC_STATE"] in (1, 2)  # 1 NormalCCOn and 2 NormalCCSet
     ret.cruiseState.standstill = cp_cruise.vl["DAS_3"]["ACC_STANDSTILL"] == 1
     ret.accFaulted = cp_cruise.vl["DAS_3"]["ACC_FAULTED"] != 0
-    self.forward_gear = ret.gearShifter == car.CarState.GearShifter.drive
-    self.cruise_active_actual = ret.cruiseState.enabled
-
-    acc_decel = cp_cruise.vl["DAS_3"]["ACC_DECEL"]
-    self.acc_decelerating = acc_decel < -0.5
 
     if self.CP.carFingerprint in RAM_CARS:
       # Auto High Beam isn't Located in this message on chrysler or jeep currently located in 729 message
@@ -140,8 +130,6 @@ class CarState(CarStateBase):
     self.lkas_car_model = cp_cam.vl["DAS_6"]["CAR_MODEL"]
     self.button_counter = cp.vl["CRUISE_BUTTONS"]["COUNTER"]
     self.cruise_buttons = cp.vl["CRUISE_BUTTONS"]
-    self.das_3 = dict(cp_cruise.vl["DAS_3"])
-    ret.brakeHoldActive = self.brake_hold
 
     return ret
 

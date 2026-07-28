@@ -19,7 +19,7 @@ from openpilot.selfdrive.controls.lib.drive_helpers import FCA_V_CRUISE_MIN
 
 BUTTONS_STATES = ["accelCruise", "decelCruise", "cancel", "resumeCruise"]
 
-BRAKE_HOLD_CARS = {
+JEEP_LONG_CARS = {
   CAR.JEEP_GRAND_CHEROKEE,
   CAR.JEEP_GRAND_CHEROKEE_2019,
 }
@@ -35,9 +35,6 @@ class CarController(CarControllerBase):
     self.last_lkas_falling_edge = 0
     self.lkas_control_bit_prev = False
     self.last_button_frame = 0
-    self.bh_hold_decel = -2.0
-    self.last_das_3_counter = -1
-    self.bh_last_resume_frame = -100
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
@@ -45,16 +42,16 @@ class CarController(CarControllerBase):
     self.jeep_long_transport_scheduler = JeepLongitudinalTransportScheduler()
     self.jeep_long_plan_sm = (
       messaging.SubMaster(["longitudinalPlan"])
-      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+      if CP.carFingerprint in JEEP_LONG_CARS else None
     )
     self.jeep_long_plan_shadow = (
       JeepLongitudinalPlanShadow(CP)
-      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+      if CP.carFingerprint in JEEP_LONG_CARS else None
     )
     self.jeep_long_plan_result = None
     self.jeep_radar_shadow_sm = (
       messaging.SubMaster(["radarState"])
-      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+      if CP.carFingerprint in JEEP_LONG_CARS else None
     )
     self.jeep_radar_shadow_last_cycle = 0
     self.jeep_radar_shadow_selection = None
@@ -71,7 +68,7 @@ class CarController(CarControllerBase):
         steer_error_max=self.params.STEER_ERROR_MAX,
         driver_threshold=STEER_THRESHOLD,
       )
-      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+      if CP.carFingerprint in JEEP_LONG_CARS else None
     )
     self.jeep_steering_rate4_shadow = (
       JeepSteeringRateCandidateShadow(
@@ -81,7 +78,7 @@ class CarController(CarControllerBase):
         steer_error_max=self.params.STEER_ERROR_MAX,
         installed_delta_limit=self.params.STEER_DELTA_UP,
       )
-      if CP.carFingerprint in BRAKE_HOLD_CARS else None
+      if CP.carFingerprint in JEEP_LONG_CARS else None
     )
 
     self.sm = messaging.SubMaster(['longitudinalPlanSP'])
@@ -328,9 +325,6 @@ class CarController(CarControllerBase):
 
       can_sends.append(chryslercan.create_lkas_command(self.packer, self.CP, int(apply_steer), lkas_control_bit))
 
-    if self.CP.carFingerprint in BRAKE_HOLD_CARS:
-      self.brake_hold(CC, CS, can_sends)
-
     self.frame += 1
 
     new_actuators = CC.actuators.as_builder()
@@ -340,7 +334,7 @@ class CarController(CarControllerBase):
     return new_actuators, can_sends
 
   def jeep_long_vehicle_eligibility(self, CC, CS):
-    if self.CP.carFingerprint not in BRAKE_HOLD_CARS:
+    if self.CP.carFingerprint not in JEEP_LONG_CARS:
       return False, "unsupported_vehicle"
     if not self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       return False, "white_panda_flag_missing"
@@ -570,72 +564,6 @@ class CarController(CarControllerBase):
       f"applied_rate={self.params.STEER_DELTA_UP},candidate_rate=4,"
       f"candidate_applied=True"
     )
-
-  def brake_hold(self, CC, CS, can_sends):
-    """Maintain stock ACC braking after the Jeep's stop-and-go timeout."""
-    if not CS.das_3:
-      return
-
-    counter = CS.das_3.get("COUNTER")
-    counter_changed = counter != self.last_das_3_counter
-    self.last_das_3_counter = counter
-
-    if (not CS.brake_hold and CS.cruise_active_actual and
-        CS.acc_decelerating and CS.out.standstill):
-      CS.brake_hold = True
-      self.bh_last_resume_frame = self.frame - 10
-      cloudlog.info("Brake hold: ACTIVATING - ACC decelerating to standstill")
-
-    if (CS.brake_hold and
-        (CC.cruiseControl.cancel or CS.out.gasPressed or
-         CS.out.brakePressed or not CS.forward_gear or
-         not CS.out.standstill)):
-      CS.brake_hold = False
-      cloudlog.info("Brake hold: DEACTIVATING")
-      return
-
-    if not CS.brake_hold:
-      return
-
-    if CS.cruise_active_actual:
-      if CS.out.standstill:
-        self.bh_hold_decel = min(
-          self.bh_hold_decel,
-          CS.das_3.get("ACC_DECEL", -2.0),
-        )
-      else:
-        self.bh_hold_decel = -2.0
-      return
-
-    counter_offset = 2 if counter_changed else 3
-    can_sends.append(chryslercan.das_3_command(
-      self.packer,
-      counter_offset,
-      False,  # go
-      False,  # torque request
-      None,   # torque
-      2,      # maximum requested gear
-      False,  # standstill flag
-      self.bh_hold_decel,
-      False,  # brake preparation
-      CS.das_3,
-    ))
-
-    if self.frame - self.bh_last_resume_frame >= 10:
-      can_sends.append(chryslercan.create_cruise_buttons(
-        self.packer,
-        CS.button_counter + 1,
-        0,
-        self.CP,
-        resume=True,
-      ))
-      self.bh_last_resume_frame = self.frame
-
-    if self.frame % 50 == 0:
-      cloudlog.info(
-        f"Brake hold: Sending DAS_3 - decel={self.bh_hold_decel}, "
-        f"counter_offset={counter_offset}"
-      )
 
   # multikyd methods, sunnyhaibin logic
   def get_cruise_buttons_status(self, CS):

@@ -82,34 +82,6 @@ def create_cruise_buttons(packer, frame, bus, CP, cruise_buttons_msg=None, butto
   return packer.make_can_msg("CRUISE_BUTTONS", bus, values)
 
 
-def das_3_command(packer, counter_offset, go, torque_req, torque, max_gear, stop, brake, brake_prep, das_3):
-  """Create DAS_3 command message like jvePilot implementation."""
-  values = das_3.copy()
-  values["ACC_AVAILABLE"] = 1
-  values["ACC_ACTIVE"] = 1
-  values["COUNTER"] = (das_3["COUNTER"] + counter_offset) % 0x10
-
-  if go is not None:
-    values["ACC_GO"] = go
-
-  if stop is not None:
-    values["ACC_STANDSTILL"] = stop
-
-  if brake is not None:
-    values["ACC_DECEL_REQ"] = 1
-    values["ACC_DECEL"] = brake
-    values["ACC_BRK_PREP"] = brake_prep
-
-  if torque is not None:
-    values["ENGINE_TORQUE_REQUEST_MAX"] = torque_req
-    values["ENGINE_TORQUE_REQUEST"] = torque
-
-  if max_gear is not None:
-    values["GR_MAX_REQ"] = max_gear
-
-  return packer.make_can_msg("DAS_3", 0, values)
-
-
 def make_wp_private_message(packer, name, values):
   values = values.copy()
   values["CHECKSUM"] = 0
