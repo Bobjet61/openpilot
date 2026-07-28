@@ -34,6 +34,10 @@ def manager_init() -> None:
   if build_metadata.release_channel:
     params.clear_all(ParamKeyType.DEVELOPMENT_ONLY)
 
+  if os.getenv("DISABLE_AUTO_UPDATES") == "1":
+    params.put_bool("DisableUpdates", True)
+    params.put_bool("UpdateAvailable", False)
+
   default_params: list[tuple[str, str | bytes]] = [
     ("CompletedTrainingVersion", "0"),
     ("DisengageOnAccelerator", "0"),

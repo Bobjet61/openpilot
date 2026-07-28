@@ -31,3 +31,20 @@ All b8w safety boundaries remain in force:
 
 `b8x` is a cleanup and verification branch. It does not authorize active
 brake or propulsion testing.
+
+## Update policy
+
+`b8x` is pinned against unattended software updates:
+
+- `launch_env.sh` exports `DISABLE_AUTO_UPDATES=1`;
+- the launcher refuses to install a staged overlay while that policy is set;
+- manager persists `DisableUpdates=True` and clears stale
+  `UpdateAvailable` state;
+- the updater process is not started while `DisableUpdates` is true;
+- the updater's existing independent `DisableUpdates` check remains intact.
+
+This prevents `b8x` from automatically installing later commits, including
+later commits on the same branch. Installing another version must be an
+intentional recovery action through the installer or SSH. Disabling automatic
+updates also means security and compatibility fixes will not arrive
+automatically.

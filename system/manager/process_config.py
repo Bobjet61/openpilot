@@ -44,6 +44,9 @@ def only_onroad(started: bool, params, CP: car.CarParams) -> bool:
 def only_offroad(started, params, CP: car.CarParams) -> bool:
   return not started
 
+def updater(started, params, CP: car.CarParams) -> bool:
+  return not started and not params.get_bool("DisableUpdates")
+
 def model_use_nav(started, params, CP: car.CarParams) -> bool:
   custom_model, model_gen = get_model_generation(params)
   return started and custom_model and model_gen not in (0, 4)
@@ -95,7 +98,7 @@ procs = [
   PythonProcess("radard", "selfdrive.controls.radard", only_onroad),
   PythonProcess("hardwared", "system.hardware.hardwared", always_run),
   PythonProcess("tombstoned", "system.tombstoned", always_run, enabled=not PC),
-  PythonProcess("updated", "system.updated.updated", only_offroad, enabled=not PC),
+  PythonProcess("updated", "system.updated.updated", updater, enabled=not PC),
   PythonProcess("uploader", "system.loggerd.uploader", always_run),
   PythonProcess("statsd", "system.statsd", always_run),
 

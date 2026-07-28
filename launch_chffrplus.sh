@@ -65,7 +65,9 @@ function launch {
   # 2. The FINALIZED consistent file has to exist, indicating there's an update
   #    that completed successfully and synced to disk.
 
-  if [ -f "${BASEDIR}/.overlay_init" ]; then
+  if [ "${DISABLE_AUTO_UPDATES:-0}" = "1" ]; then
+    echo "Automatic software updates are disabled; skipping staged overlay installation"
+  elif [ -f "${BASEDIR}/.overlay_init" ]; then
     find ${BASEDIR}/.git -newer ${BASEDIR}/.overlay_init | grep -q '.' 2> /dev/null
     if [ $? -eq 0 ]; then
       echo "${BASEDIR} has been modified, skipping overlay update installation"
