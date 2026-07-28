@@ -56,9 +56,15 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
 #define CHRYSLER_LONG_TORQUE_MAX_RAW 2400
+#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2160
+#define CHRYSLER_LONG_MOVING_SPEED_MIN_RAW 29
 #define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US 15000U
 #define CHRYSLER_LONG_COUNTER_RESET_US 100000U
+#define CHRYSLER_LONG_RESUME_ARM_TIMEOUT_US 1000000U
+#define CHRYSLER_LONG_LAUNCH_SESSION_TIMEOUT_US 8000000U
+#define CHRYSLER_LONG_BUTTON_CANCEL 0x01U
+#define CHRYSLER_LONG_BUTTON_RESUME 0x10U
 
 typedef struct {
   const int EPS_2;
@@ -211,7 +217,14 @@ static uint8_t chrysler_long_cycle_counter = 0U;
 static uint8_t chrysler_long_last_counter = 0U;
 static bool chrysler_long_counter_seen = false;
 static bool chrysler_long_brake_active = false;
+static bool chrysler_long_launch_candidate = false;
+static bool chrysler_long_launch_requested_cycle = false;
+static bool chrysler_long_launch_active = false;
+static bool chrysler_long_resume_seen = false;
+static int chrysler_long_vehicle_speed_raw = 0;
 static uint32_t chrysler_long_last_cycle_ts = 0U;
+static uint32_t chrysler_long_resume_ts = 0U;
+static uint32_t chrysler_long_launch_start_ts = 0U;
 
 typedef enum {
   CHRYSLER_LONG_REJECT_NONE = 0U,
@@ -305,8 +318,34 @@ static bool chrysler_long_fresh(const uint32_t now, const uint32_t last,
          (get_ts_elapsed(now, last) <= CHRYSLER_LONG_SOURCE_TIMEOUT_US);
 }
 
+static bool chrysler_long_resume_recent(const uint32_t now) {
+  return chrysler_long_resume_seen &&
+         (get_ts_elapsed(now, chrysler_long_resume_ts) <=
+          CHRYSLER_LONG_RESUME_ARM_TIMEOUT_US);
+}
+
+static void chrysler_long_clear_launch(void) {
+  chrysler_long_launch_active = false;
+  chrysler_long_launch_start_ts = 0U;
+}
+
+static void chrysler_long_update_launch_state(void) {
+  const uint32_t now = microsecond_timer_get();
+  if (chrysler_long_launch_active &&
+      (gas_pressed || brake_pressed || chrysler_long_stock_collision ||
+       !acc_main_on ||
+       (chrysler_long_vehicle_speed_raw >=
+        CHRYSLER_LONG_MOVING_SPEED_MIN_RAW) ||
+       (get_ts_elapsed(now, chrysler_long_launch_start_ts) >
+        CHRYSLER_LONG_LAUNCH_SESSION_TIMEOUT_US))) {
+    chrysler_long_clear_launch();
+    chrysler_long_resume_seen = false;
+  }
+}
+
 static uint8_t chrysler_long_source_reject_reason(
-    uint32_t *detail, const bool standstill_brake) {
+    uint32_t *detail, const bool standstill_brake,
+    const bool launch_authorized) {
   const uint32_t now = microsecond_timer_get();
   uint8_t reason = CHRYSLER_LONG_REJECT_NONE;
   *detail = 0U;
@@ -320,7 +359,7 @@ static uint8_t chrysler_long_source_reject_reason(
     reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
   } else if (!acc_main_on) {
     reason = CHRYSLER_LONG_REJECT_ACC_MAIN;
-  } else if (!vehicle_moving && !standstill_brake) {
+  } else if (!vehicle_moving && !standstill_brake && !launch_authorized) {
     reason = CHRYSLER_LONG_REJECT_STOPPED;
   } else if (gas_pressed) {
     reason = CHRYSLER_LONG_REJECT_GAS;
@@ -357,6 +396,8 @@ static uint8_t chrysler_long_source_reject_reason(
 static void chrysler_long_reset_pending(void) {
   chrysler_long_stage = 0U;
   chrysler_long_brake_active = false;
+  chrysler_long_launch_candidate = false;
+  chrysler_long_launch_requested_cycle = false;
 }
 
 static bool chrysler_long_checksum_valid(const CANPacket_t *to_send) {
@@ -365,6 +406,7 @@ static bool chrysler_long_checksum_valid(const CANPacket_t *to_send) {
 }
 
 static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
+  chrysler_long_update_launch_state();
   const bool shadow_valid = chrysler_long_shadow_enabled;
   const bool platform_valid = chrysler_platform == CHRYSLER_PACIFICA;
   const bool stage_valid = chrysler_long_stage == 0U;
@@ -374,11 +416,15 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
   const int command_type = (GET_BYTE(to_send, 4) >> 4) & 0x7U;
   const bool standstill_brake =
     !vehicle_moving && (command_type == 1);
+  const bool launch_candidate =
+    !vehicle_moving && (command_type == 0) &&
+    (chrysler_long_launch_active ||
+     chrysler_long_resume_recent(microsecond_timer_get()));
   uint32_t source_detail = 0U;
   uint8_t source_reason = CHRYSLER_LONG_REJECT_NONE;
   if (shadow_valid && platform_valid && stage_valid) {
     source_reason = chrysler_long_source_reject_reason(
-      &source_detail, standstill_brake);
+      &source_detail, standstill_brake, launch_candidate);
   }
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool checksum_valid =
@@ -428,6 +474,7 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
     chrysler_long_last_counter = (uint8_t)counter;
     chrysler_long_counter_seen = true;
     chrysler_long_brake_active = command_type == 1;
+    chrysler_long_launch_candidate = launch_candidate;
     chrysler_long_last_cycle_ts = now;
     chrysler_long_stage = 1U;
   } else {
@@ -471,29 +518,53 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
 }
 
 static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
+  chrysler_long_update_launch_state();
   const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
   const bool shadow_valid = chrysler_long_shadow_enabled;
   const bool stage_valid = chrysler_long_stage == 1U;
   const bool counter_valid = counter == chrysler_long_cycle_counter;
   const bool checksum_valid = chrysler_long_checksum_valid(to_send);
+  const bool launch_request = GET_BIT(to_send, 25U);
+  const bool launch_authorized =
+    (chrysler_long_vehicle_speed_raw <
+     CHRYSLER_LONG_MOVING_SPEED_MIN_RAW) &&
+    (chrysler_long_launch_active ||
+     (chrysler_long_launch_candidate &&
+      chrysler_long_resume_recent(microsecond_timer_get())));
   uint32_t source_detail = 0U;
   const uint8_t source_reason =
     chrysler_long_source_reject_reason(
-      &source_detail, !vehicle_moving && chrysler_long_brake_active);
+      &source_detail, !vehicle_moving && chrysler_long_brake_active,
+      launch_request && launch_authorized);
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
     (GET_BYTE(to_send, 1) == 0U) &&
     (GET_BYTE(to_send, 2) == 0U) &&
     (GET_BYTE(to_send, 3) ==
-      (chrysler_long_actuation_enabled ? 1U : 0U)) &&
+      ((chrysler_long_actuation_enabled ? 1U : 0U) |
+       (launch_request ? 2U : 0U))) &&
     (GET_BYTE(to_send, 4) == 0U) &&
     (GET_BYTE(to_send, 5) == 0U) &&
     ((GET_BYTE(to_send, 6) & 0xFU) == 0U);
+  const bool launch_valid =
+    !launch_request ||
+    (chrysler_long_actuation_enabled && launch_authorized);
   const bool allowed = shadow_valid && stage_valid && counter_valid &&
-                       checksum_valid && source_valid && payload_valid;
+                       checksum_valid && source_valid && payload_valid &&
+                       launch_valid;
 
   if (allowed) {
+    if (launch_request) {
+      if (!chrysler_long_launch_active) {
+        chrysler_long_launch_start_ts = microsecond_timer_get();
+      }
+      chrysler_long_launch_active = true;
+      chrysler_long_resume_seen = false;
+    } else {
+      chrysler_long_clear_launch();
+    }
+    chrysler_long_launch_requested_cycle = launch_request;
     chrysler_long_stage = 2U;
   } else {
     if (!shadow_valid) {
@@ -519,6 +590,7 @@ static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
 }
 
 static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
+  chrysler_long_update_launch_state();
   const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
   const bool engine_request = GET_BIT(to_send, 39U);
   const int torque_raw = ((GET_BYTE(to_send, 4) & 0x7FU) << 8) |
@@ -530,7 +602,9 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
   uint32_t source_detail = 0U;
   const uint8_t source_reason =
     chrysler_long_source_reject_reason(
-      &source_detail, !vehicle_moving && chrysler_long_brake_active);
+      &source_detail, !vehicle_moving && chrysler_long_brake_active,
+      chrysler_long_launch_requested_cycle &&
+      chrysler_long_launch_active);
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
@@ -543,9 +617,20 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
 
   bool command_valid = false;
   if (engine_request) {
+    const int torque_max_raw =
+      (chrysler_long_vehicle_speed_raw <
+       CHRYSLER_LONG_MOVING_SPEED_MIN_RAW) ?
+      CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW :
+      CHRYSLER_LONG_TORQUE_MAX_RAW;
+    const bool low_speed_launch_valid =
+      (chrysler_long_vehicle_speed_raw >=
+       CHRYSLER_LONG_MOVING_SPEED_MIN_RAW) ||
+      (chrysler_long_launch_requested_cycle &&
+       chrysler_long_launch_active);
     command_valid =
+      low_speed_launch_valid &&
       (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW) &&
-      (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+      (torque_raw <= torque_max_raw);
   } else {
     command_valid = torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW;
   }
@@ -609,6 +694,10 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
       (((GET_BYTE(to_push, 4) >> 4) & 0x7U) > 1U);
     chrysler_long_stock_ts = microsecond_timer_get();
     chrysler_long_stock_seen = true;
+    if (chrysler_long_stock_collision || !acc_main_on) {
+      chrysler_long_resume_seen = false;
+    }
+    chrysler_long_update_launch_state();
   }
 
   // TODO: use the same message for both
@@ -619,9 +708,15 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
   if ((chrysler_platform == CHRYSLER_PACIFICA) && (bus == 0) && (addr == 514)) {
     int speed_l = (GET_BYTE(to_push, 0) << 4) + (GET_BYTE(to_push, 1) >> 4);
     int speed_r = (GET_BYTE(to_push, 2) << 4) + (GET_BYTE(to_push, 3) >> 4);
+    chrysler_long_vehicle_speed_raw = (speed_l + speed_r) / 2;
     vehicle_moving = (speed_l != 0) || (speed_r != 0);
     chrysler_long_speed_ts = microsecond_timer_get();
     chrysler_long_speed_seen = true;
+    if (chrysler_long_vehicle_speed_raw >=
+        CHRYSLER_LONG_MOVING_SPEED_MIN_RAW) {
+      chrysler_long_resume_seen = false;
+    }
+    chrysler_long_update_launch_state();
   }
 
   // exit controls on rising edge of gas press
@@ -629,6 +724,10 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     gas_pressed = GET_BYTE(to_push, 0U) != 0U;
     chrysler_long_gas_ts = microsecond_timer_get();
     chrysler_long_gas_seen = true;
+    if (gas_pressed) {
+      chrysler_long_resume_seen = false;
+    }
+    chrysler_long_update_launch_state();
   }
 
   // exit controls on rising edge of brake press
@@ -636,6 +735,24 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     brake_pressed = ((GET_BYTE(to_push, 0U) & 0xFU) >> 2U) == 1U;
     chrysler_long_brake_ts = microsecond_timer_get();
     chrysler_long_brake_seen = true;
+    if (brake_pressed) {
+      chrysler_long_resume_seen = false;
+    }
+    chrysler_long_update_launch_state();
+  }
+
+  if ((chrysler_platform == CHRYSLER_PACIFICA) && (bus == 0) &&
+      (addr == chrysler_addrs->CRUISE_BUTTONS) &&
+      (GET_LEN(to_push) == 3)) {
+    const uint8_t button = GET_BYTE(to_push, 0);
+    if (button == CHRYSLER_LONG_BUTTON_RESUME) {
+      chrysler_long_resume_seen = true;
+      chrysler_long_resume_ts = microsecond_timer_get();
+    } else if (button == CHRYSLER_LONG_BUTTON_CANCEL) {
+      chrysler_long_clear_launch();
+      chrysler_long_resume_seen = false;
+    } else {
+    }
   }
 
   generic_rx_checks((bus == 0) && (addr == chrysler_addrs->LKAS_COMMAND));
@@ -759,6 +876,10 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_long_brake_seen = false;
   chrysler_long_stock_seen = false;
   chrysler_long_counter_seen = false;
+  chrysler_long_resume_seen = false;
+  chrysler_long_resume_ts = 0U;
+  chrysler_long_vehicle_speed_raw = 0;
+  chrysler_long_clear_launch();
   chrysler_long_last_counter = 0U;
   chrysler_long_cycle_counter = 0U;
   chrysler_long_last_cycle_ts = 0U;

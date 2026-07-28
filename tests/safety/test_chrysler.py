@@ -255,6 +255,14 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     values = {"Brake_Pedal_State": 1 if brake else 0}
     return self.packer.make_can_msg_panda("ESP_1", 0, values)
 
+  def _resume_button_msg(self, counter=1):
+    values = {"ACC_Resume": 1, "COUNTER": counter}
+    return self.packer.make_can_msg_panda("CRUISE_BUTTONS", 0, values)
+
+  def _cancel_button_msg(self, counter=1):
+    values = {"ACC_Cancel": 1, "COUNTER": counter}
+    return self.packer.make_can_msg_panda("CRUISE_BUTTONS", 0, values)
+
   @staticmethod
   def _fca_checksum(dat):
     checksum = 0xFF
@@ -302,11 +310,11 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       self.PRIVATE_BRAKE, dat, corrupt_checksum=corrupt_checksum, bus=bus,
     )
 
-  def _private_dash_msg(self, counter, enable=False,
+  def _private_dash_msg(self, counter, enable=False, launch=False,
                         corrupt_checksum=False, unused_byte=0, bus=0):
     dat = bytearray(8)
     dat[0] = unused_byte
-    dat[3] = int(enable)
+    dat[3] = int(enable) | (int(launch) << 1)
     dat[6] = (counter & 0xF) << 4
     return self._private_msg(
       self.PRIVATE_DASH, dat, corrupt_checksum=corrupt_checksum, bus=bus,
@@ -331,7 +339,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._das_3_msg(
       counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=1,
     )))
-    self.assertTrue(self._rx(self._speed_msg(1)))
+    self.assertTrue(self._rx(self._speed_msg(3)))
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
 
@@ -344,15 +352,25 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._user_brake_msg(False)))
     self.safety.set_controls_allowed(False)
 
+  def _enable_standstill_launch_source(self, counter=1):
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=1,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+
   def _tx_private_cycle(self, counter, time_us, decel_raw=4094,
                         command_type=0, torque_raw=2000,
-                        engine_request=False, enable=False):
+                        engine_request=False, enable=False, launch=False):
     self.safety.set_timer(time_us)
     return (
       self._tx(self._private_brake_msg(
         counter, decel_raw=decel_raw, command_type=command_type,
       )),
-      self._tx(self._private_dash_msg(counter, enable=enable)),
+      self._tx(self._private_dash_msg(
+        counter, enable=enable, launch=launch,
+      )),
       self._tx(self._private_torque_msg(
         counter, torque_raw=torque_raw,
         engine_request=engine_request,
@@ -612,6 +630,138 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._enable_standstill_hold_source()
     self.assertEqual(
       self._tx_private_cycle(0, 0, enable=True),
+      (False, False, False),
+    )
+
+  def test_standstill_launch_requires_physical_resume_and_launch_bit(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_launch_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (False, False, False),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_launch_source()
+    self.assertTrue(self._rx(self._resume_button_msg()))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (True, True, True),
+    )
+
+  def test_standstill_launch_torque_cap_and_timeouts(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_launch_source()
+    self.assertTrue(self._rx(self._resume_button_msg()))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2161, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (True, True, False),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_launch_source()
+    self.safety.set_timer(1)
+    self.assertTrue(self._rx(self._resume_button_msg()))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 1_000_002, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (False, False, False),
+    )
+
+  def test_standstill_launch_is_one_shot_and_hazards_disarm(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_launch_source()
+    self.assertTrue(self._rx(self._resume_button_msg()))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        1, 20_000, decel_raw=2866, command_type=1,
+        enable=True, launch=False,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        2, 40_000, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (False, False, False),
+    )
+
+    for source_change in ("speed", "gas", "brake", "collision", "main_off",
+                          "cancel"):
+      self._reset_long_shadow(actuation=True)
+      self._enable_standstill_launch_source()
+      self.assertTrue(self._rx(self._resume_button_msg()))
+      self.assertEqual(
+        self._tx_private_cycle(
+          0, 0, torque_raw=2160, engine_request=True,
+          enable=True, launch=True,
+        ),
+        (True, True, True),
+      )
+      self.safety.set_timer(20_000)
+      if source_change == "speed":
+        self.assertTrue(self._rx(self._speed_msg(3)))
+      elif source_change == "gas":
+        self.assertTrue(self._rx(self._user_gas_msg(1)))
+      elif source_change == "brake":
+        self.assertTrue(self._rx(self._user_brake_msg(True)))
+      elif source_change == "collision":
+        self.assertTrue(self._rx(self._das_3_msg(
+          counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=1, ACC_DECEL_REQ=2,
+        )))
+      elif source_change == "main_off":
+        self.assertTrue(self._rx(self._das_3_msg(
+          counter=2, ACC_AVAILABLE=0, ACC_ACTIVE=0,
+        )))
+      else:
+        self.assertTrue(self._rx(self._cancel_button_msg(counter=2)))
+      result = self._tx_private_cycle(
+        1, 40_000, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      )
+      self.assertNotEqual(result, (True, True, True), source_change)
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_launch_source()
+    self.assertTrue(self._rx(self._resume_button_msg()))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        1, 20_000, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        2, 8_000_001, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
       (False, False, False),
     )
 
