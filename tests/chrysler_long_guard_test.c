@@ -11,7 +11,7 @@ static bool valid_brake_command(void) {
 
 
 int main(void) {
-  assert(CHRYSLER_LONG_ACTUATION == 0U);
+  assert(CHRYSLER_LONG_ACTUATION == 1U);
 
   assert(chrysler_long_is_fresh(1000000U, 950000U, true, 100000U));
   assert(!chrysler_long_is_fresh(1000000U, 899999U, true, 100000U));
@@ -34,7 +34,7 @@ int main(void) {
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_MIN_RAW,
     1, false, false, CHRYSLER_LONG_TORQUE_ZERO_RAW,
-    100, false, false, false));
+    CHRYSLER_LONG_MOVING_SPEED_MIN_RAW, false, false, false));
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
@@ -68,7 +68,11 @@ int main(void) {
     2000, 100, false, false, false));
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, 2866, 1, false, false,
-    2000, 10, false, false, false));
+    2000, CHRYSLER_LONG_MOVING_SPEED_MIN_RAW - 1,
+    false, false, false));
+  assert(!chrysler_long_commands_valid(
+    true, true, true, false, false, 2866, 1, false, true,
+    2100, 100, false, false, false));
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, 3200, 0, false, false,
     2000, 100, false, false, false));

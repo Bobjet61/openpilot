@@ -4,12 +4,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Hard-coded off for source review and bench validation. This is deliberately
-// not overrideable with a compiler flag.
+// b8y actuation build. This remains source-controlled and cannot be enabled or
+// altered with a compiler flag. Runtime output still requires every freshness,
+// integrity, pedal, collision, speed, and command-envelope check below.
 #ifdef CHRYSLER_LONG_ACTUATION
 #error "CHRYSLER_LONG_ACTUATION must not be set from the build command"
 #endif
-#define CHRYSLER_LONG_ACTUATION 0U
+#define CHRYSLER_LONG_ACTUATION 1U
 
 #define CHRYSLER_LONG_BRAKE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_DASH_TIMEOUT_US 250000U
