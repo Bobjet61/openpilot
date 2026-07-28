@@ -108,11 +108,11 @@ class CarControllerParams:
       self.STEER_DELTA_DOWN = 6
       self.STEER_MAX = 350  # EPS allows more, up to 350?
     elif CP.carFingerprint in (CAR.JEEP_GRAND_CHEROKEE, CAR.JEEP_GRAND_CHEROKEE_2019):
-      # b9s: retain the proven rate-5 response and apply the replayed modest
-      # Jeep-only torque increase. The real-time torque envelope is unchanged.
+      # b9s: retain the proven rate-5 response at the Jeep's accepted
+      # 261-unit ceiling. A 270-unit road test produced a permanent EPS fault.
       self.STEER_DELTA_UP = 5
       self.STEER_DELTA_DOWN = 5
-      self.STEER_MAX = 270
+      self.STEER_MAX = 261
     else:
       self.STEER_DELTA_UP = 3
       self.STEER_DELTA_DOWN = 3

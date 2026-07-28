@@ -28,7 +28,7 @@ forbidden.
 
 ## Steering
 
-The applied Jeep steering calibration is 270 maximum torque units at rate 5,
-a 3.4% increase from the prior 261-unit ceiling. The rate and real-time torque
-envelopes remain unchanged. A 280-unit candidate runs as telemetry only and
+The applied Jeep steering calibration is 261 maximum torque units at rate 5.
+The rate and real-time torque envelopes remain unchanged. The 270-unit road
+test produced a permanent EPS fault, so 270 is retained only as telemetry and
 has no CAN output.

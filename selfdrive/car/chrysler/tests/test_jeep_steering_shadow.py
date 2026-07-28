@@ -240,7 +240,7 @@ class TestJeepSteeringShadow(unittest.TestCase):
       self.assertNotIn(forbidden, shadow_source)
 
     values_source = VALUES_PATH.read_text(encoding="utf-8")
-    self.assertIn("self.STEER_MAX = 270", values_source)
+    self.assertIn("self.STEER_MAX = 261", values_source)
     self.assertIn("self.STEER_DELTA_UP = 5", values_source)
     self.assertIn("self.STEER_DELTA_DOWN = 5", values_source)
     self.assertIn("CAR.JEEP_GRAND_CHEROKEE_2019", values_source)
@@ -265,7 +265,7 @@ class TestJeepSteeringShadow(unittest.TestCase):
       controller_source,
     )
     self.assertIn("candidate_applied=True", controller_source)
-    self.assertIn("JEEP_TORQUE_CANDIDATE_MAX = 280", controller_source)
+    self.assertIn("JEEP_TORQUE_CANDIDATE_MAX = 270", controller_source)
     self.assertIn("candidate_applied=False", controller_source)
     self.assertIn(
       "new_steer = int(round(CC.actuators.steer * self.params.STEER_MAX))",

@@ -29,7 +29,7 @@ JEEP_LONG_CARS = {
   CAR.JEEP_GRAND_CHEROKEE,
   CAR.JEEP_GRAND_CHEROKEE_2019,
 }
-JEEP_TORQUE_CANDIDATE_MAX = 280
+JEEP_TORQUE_CANDIDATE_MAX = 270
 LEAD_DEPARTURE_CONFIRM_CYCLES = 8
 LEAD_DEPARTURE_RADAR_VREL_MPS = 0.40
 LEAD_DEPARTURE_VISION_VREL_MPS = 0.30
@@ -93,7 +93,7 @@ class CarController(CarControllerBase):
       )
       if CP.carFingerprint in JEEP_LONG_CARS else None
     )
-    self.jeep_steering_280_shadow = (
+    self.jeep_steering_270_shadow = (
       JeepSteeringRateCandidateShadow(
         steer_max=JEEP_TORQUE_CANDIDATE_MAX,
         candidate_delta_up=self.params.STEER_DELTA_UP,
@@ -268,7 +268,7 @@ class CarController(CarControllerBase):
       self.log_jeep_radar_shadow(CS)
       self.log_jeep_steering_shadow()
       self.log_jeep_steering_rate5_shadow()
-      self.log_jeep_steering_280_shadow()
+      self.log_jeep_steering_270_shadow()
       self.log_jeep_stop_go(CS)
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
@@ -405,8 +405,8 @@ class CarController(CarControllerBase):
           eps_torque=CS.out.steeringTorqueEps,
           control_allowed=control_allowed,
         )
-      if self.jeep_steering_280_shadow is not None:
-        self.jeep_steering_280_shadow.update(
+      if self.jeep_steering_270_shadow is not None:
+        self.jeep_steering_270_shadow.update(
           requested_raw=int(round(
             CC.actuators.steer * JEEP_TORQUE_CANDIDATE_MAX,
           )),
@@ -673,13 +673,13 @@ class CarController(CarControllerBase):
       f"candidate_applied=True"
     )
 
-  def log_jeep_steering_280_shadow(self):
-    if self.jeep_steering_280_shadow is None:
+  def log_jeep_steering_270_shadow(self):
+    if self.jeep_steering_270_shadow is None:
       return
 
-    window = self.jeep_steering_280_shadow.snapshot()
+    window = self.jeep_steering_270_shadow.snapshot()
     cloudlog.info(
-      f"Jeep steer torque280 shadow: samples={window.samples},"
+      f"Jeep steer torque270 shadow: samples={window.samples},"
       f"active={window.active_samples},"
       f"changed={window.changed_samples},"
       f"improved={window.improved_samples},"
@@ -687,12 +687,12 @@ class CarController(CarControllerBase):
       f"equal={window.equal_samples},"
       f"panda_rate_violation="
       f"{window.current_panda_rate_violation_samples},"
-      f"candidate_at_280={window.candidate_ceiling_samples},"
+      f"candidate_at_270={window.candidate_ceiling_samples},"
       f"max_candidate={window.max_candidate_raw},"
       f"max_delta={window.max_candidate_delta},"
       f"max_divergence={window.max_candidate_divergence},"
-      f"mean_gap_270={window.mean_current_request_gap:.3f},"
-      f"mean_gap_280={window.mean_candidate_request_gap:.3f},"
+      f"mean_gap_261={window.mean_current_request_gap:.3f},"
+      f"mean_gap_270={window.mean_candidate_request_gap:.3f},"
       f"applied_max={self.params.STEER_MAX},candidate_max="
       f"{JEEP_TORQUE_CANDIDATE_MAX},candidate_applied=False"
     )
