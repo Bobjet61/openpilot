@@ -39,7 +39,7 @@ const SteeringLimits CHRYSLER_JEEP_RATE4_STEERING_LIMITS = {
 };
 
 const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
-  .max_steer = 270,
+  .max_steer = 261,
   .max_rt_delta = 112,
   .max_rt_interval = 250000,
   .max_rate_up = 5,
