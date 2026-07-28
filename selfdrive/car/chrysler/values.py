@@ -108,10 +108,10 @@ class CarControllerParams:
       self.STEER_DELTA_DOWN = 6
       self.STEER_MAX = 350  # EPS allows more, up to 350?
     elif CP.carFingerprint in (CAR.JEEP_GRAND_CHEROKEE, CAR.JEEP_GRAND_CHEROKEE_2019):
-      # b8r: improve curve-reversal response without increasing maximum
+      # b8y: improve curve-reversal response without increasing maximum
       # steering torque or changing the real-time torque envelope.
-      self.STEER_DELTA_UP = 4
-      self.STEER_DELTA_DOWN = 4
+      self.STEER_DELTA_UP = 5
+      self.STEER_DELTA_DOWN = 5
       self.STEER_MAX = 261
     else:
       self.STEER_DELTA_UP = 3

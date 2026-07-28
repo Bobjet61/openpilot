@@ -66,16 +66,17 @@ class CarInterface(CarInterfaceBase):
     # Jeep
     elif candidate in (CAR.JEEP_GRAND_CHEROKEE, CAR.JEEP_GRAND_CHEROKEE_2019):
       ret.steerActuatorDelay = 0.2
-      # This must match the embedded Panda's Jeep-only rate-4 safety envelope.
+      # This must match the embedded Panda's Jeep-only rate-5 safety envelope.
       # Maximum torque and the real-time delta remain at their stock limits.
-      ret.safetyConfigs[0].safetyParam |= Panda.FLAG_CHRYSLER_JEEP_RATE4
+      ret.safetyConfigs[0].safetyParam |= Panda.FLAG_CHRYSLER_JEEP_RATE5
       ret.safetyConfigs[0].safetyParam = jeep_long_shadow_safety_param(
         ret.safetyConfigs[0].safetyParam,
         Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW,
         Panda.FLAG_CHRYSLER_JEEP_LONG_DIAGNOSTIC,
+        Panda.FLAG_CHRYSLER_JEEP_LONG_ACTUATION,
       )
-      # Experimental longitudinal stays unavailable while this branch only
-      # packs and logs shadow commands.
+      # b8y uses openpilot longitudinal only while the moving-only host and
+      # dual-Panda safety gates all agree.
       ret.experimentalLongitudinalAvailable = JEEP_LONG_ACTUATION_COMPILED
       ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED
 

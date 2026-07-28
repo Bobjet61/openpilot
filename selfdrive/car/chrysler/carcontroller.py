@@ -10,7 +10,12 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
-from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JeepLongitudinalShadow, JeepLongitudinalTransportScheduler
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
+  JEEP_LONG_ACTUATION_COMPILED,
+  MIN_ACTIVE_SPEED_MPS,
+  JeepLongitudinalShadow,
+  JeepLongitudinalTransportScheduler,
+)
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
@@ -70,11 +75,11 @@ class CarController(CarControllerBase):
       )
       if CP.carFingerprint in JEEP_LONG_CARS else None
     )
-    self.jeep_steering_rate4_shadow = (
+    self.jeep_steering_rate5_shadow = (
       JeepSteeringRateCandidateShadow(
         steer_max=self.params.STEER_MAX,
-        candidate_delta_up=4,
-        candidate_delta_down=4,
+        candidate_delta_up=5,
+        candidate_delta_down=5,
         steer_error_max=self.params.STEER_ERROR_MAX,
         installed_delta_limit=self.params.STEER_DELTA_UP,
       )
@@ -159,8 +164,11 @@ class CarController(CarControllerBase):
     )
     if self.frame % 2 == 0:
       requested_accel = (
-        self.jeep_long_plan_result.controller_accel_mps2
-        if self.jeep_long_plan_result is not None else 0.0
+        CC.actuators.accel
+        if JEEP_LONG_ACTUATION_COMPILED else (
+          self.jeep_long_plan_result.controller_accel_mps2
+          if self.jeep_long_plan_result is not None else 0.0
+        )
       )
       plan_eligible = (
         self.jeep_long_plan_result.eligible
@@ -170,20 +178,25 @@ class CarController(CarControllerBase):
         requested_accel,
         plan_eligible,
       )
-      self.jeep_long_shadow_frames = chryslercan.create_wp_long_shadow_messages(
-        self.packer, self.jeep_long_envelope, self.frame // 2)
+      self.jeep_long_shadow_frames = []
+      self.jeep_long_transport_frames = []
       transport_counter = self.jeep_long_transport_scheduler.next_counter(
         now_nanos,
         self.jeep_long_envelope.transport_enabled,
       )
       if transport_counter is not None:
-        self.jeep_long_transport_frames = (
-          chryslercan.create_wp_long_transport_messages(
-            self.packer, transport_counter)
-        )
-        can_sends.extend(self.jeep_long_transport_frames)
-      else:
-        self.jeep_long_transport_frames = []
+        if self.jeep_long_envelope.host_enabled:
+          self.jeep_long_shadow_frames = (
+            chryslercan.create_wp_long_shadow_messages(
+              self.packer, self.jeep_long_envelope, transport_counter)
+          )
+          can_sends.extend(self.jeep_long_shadow_frames)
+        else:
+          self.jeep_long_transport_frames = (
+            chryslercan.create_wp_long_transport_messages(
+              self.packer, transport_counter)
+          )
+          can_sends.extend(self.jeep_long_transport_frames)
 
     if self.frame % 100 == 0 and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       cloudlog.info(
@@ -199,7 +212,7 @@ class CarController(CarControllerBase):
       self.log_jeep_long_plan_shadow(CS)
       self.log_jeep_radar_shadow(CS)
       self.log_jeep_steering_shadow()
-      self.log_jeep_steering_rate4_shadow()
+      self.log_jeep_steering_rate5_shadow()
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
       can_sends.append(chryslercan.create_lkas_heartbit(self.packer, CS.lkas_disabled, CS.lkas_heartbit))
@@ -313,8 +326,8 @@ class CarController(CarControllerBase):
           temporary_fault=CS.out.steerFaultTemporary,
           permanent_fault=CS.out.steerFaultPermanent,
         )
-      if self.jeep_steering_rate4_shadow is not None:
-        self.jeep_steering_rate4_shadow.update(
+      if self.jeep_steering_rate5_shadow is not None:
+        self.jeep_steering_rate5_shadow.update(
           requested_raw=new_steer,
           installed_applied_raw=apply_steer,
           eps_torque=CS.out.steeringTorqueEps,
@@ -340,6 +353,8 @@ class CarController(CarControllerBase):
       return False, "white_panda_flag_missing"
     if not CC.enabled:
       return False, "controls_disabled"
+    if not CC.longActive:
+      return False, "long_controls_inactive"
     if CS.out.gearShifter not in FORWARD_GEARS:
       return False, "gear"
     if not CS.out.cruiseState.available:
@@ -354,7 +369,7 @@ class CarController(CarControllerBase):
       return False, "gas_pressed"
     if CS.out.stockAeb:
       return False, "stock_aeb"
-    if CS.out.standstill or CS.out.vEgo <= 0.1:
+    if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:
       return False, "not_moving"
     return True, "eligible"
 
@@ -541,13 +556,13 @@ class CarController(CarControllerBase):
       f"longest_applied_261_ms={window.longest_applied_ceiling_ms}"
     )
 
-  def log_jeep_steering_rate4_shadow(self):
-    if self.jeep_steering_rate4_shadow is None:
+  def log_jeep_steering_rate5_shadow(self):
+    if self.jeep_steering_rate5_shadow is None:
       return
 
-    window = self.jeep_steering_rate4_shadow.snapshot()
+    window = self.jeep_steering_rate5_shadow.snapshot()
     cloudlog.info(
-      f"Jeep steer rate4 shadow: samples={window.samples},"
+      f"Jeep steer rate5 shadow: samples={window.samples},"
       f"active={window.active_samples},"
       f"changed={window.changed_samples},"
       f"improved={window.improved_samples},"
@@ -560,8 +575,8 @@ class CarController(CarControllerBase):
       f"max_delta={window.max_candidate_delta},"
       f"max_divergence={window.max_candidate_divergence},"
       f"mean_gap_rate3={window.mean_current_request_gap:.3f},"
-      f"mean_gap_rate4={window.mean_candidate_request_gap:.3f},"
-      f"applied_rate={self.params.STEER_DELTA_UP},candidate_rate=4,"
+      f"mean_gap_rate5={window.mean_candidate_request_gap:.3f},"
+      f"applied_rate={self.params.STEER_DELTA_UP},candidate_rate=5,"
       f"candidate_applied=True"
     )
 

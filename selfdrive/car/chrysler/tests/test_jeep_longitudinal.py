@@ -101,19 +101,19 @@ def load_chryslercan():
 
 
 class TestJeepLongitudinalShadow(unittest.TestCase):
-  def test_transport_is_on_but_actuation_is_compile_time_off(self):
-    self.assertFalse(JEEP_LONG_ACTUATION_COMPILED)
+  def test_transport_and_actuation_are_compiled_on_for_b8y(self):
+    self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
     self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)
     self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
     self.assertTrue(result.transport_enabled)
-    self.assertFalse(result.host_enabled)
+    self.assertTrue(result.host_enabled)
 
-  def test_committed_vehicle_path_keeps_shadow_frames_and_longitudinal_off(self):
+  def test_committed_vehicle_path_sends_only_guarded_active_frames(self):
     carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
     guarded_transport_append = (
       "if transport_counter is not None:\n"
-      "        self.jeep_long_transport_frames = ("
+      "        if self.jeep_long_envelope.host_enabled:"
     )
     self.assertIn(guarded_transport_append, carcontroller_source)
     self.assertEqual(
@@ -122,18 +122,22 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       ),
       1,
     )
-    self.assertNotIn(
-      "can_sends.extend(self.jeep_long_shadow_frames)",
-      carcontroller_source,
+    self.assertEqual(
+      carcontroller_source.count(
+        "can_sends.extend(self.jeep_long_shadow_frames)",
+      ),
+      1,
     )
     self.assertIn(
       "self.jeep_long_transport_scheduler.next_counter(",
       carcontroller_source,
     )
     self.assertIn(
-      "if CS.out.standstill or CS.out.vEgo <= 0.1:",
+      "if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:",
       carcontroller_source,
     )
+    self.assertIn("if not CC.longActive:", carcontroller_source)
+    self.assertIn("CC.actuators.accel", carcontroller_source)
 
     interface_source = INTERFACE_PATH.read_text(encoding="utf-8")
     self.assertIn(
@@ -201,7 +205,10 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
 
   def test_transport_and_actuation_are_independent_fail_closed_gates(self):
-    with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True):
+    with (
+      patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True),
+      patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", False),
+    ):
       transport_only = JeepLongitudinalShadow().update(-1.0, eligible=True)
       self.assertTrue(transport_only.transport_enabled)
       self.assertFalse(transport_only.host_enabled)
@@ -240,8 +247,11 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
     self.assertEqual(jeep_long_shadow_safety_param(0, 4, 16), 20)
     self.assertEqual(jeep_long_shadow_safety_param(8, 4, 16), 28)
+    self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 116)
+    with patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", False):
+      self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 52)
     with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", False):
-      self.assertEqual(jeep_long_shadow_safety_param(8, 4, 16), 8)
+      self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 32)
 
   def test_requested_accel_is_clipped(self):
     positive = JeepLongitudinalShadow().update(20.0, eligible=True)

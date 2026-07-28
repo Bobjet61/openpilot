@@ -228,7 +228,7 @@ class TestJeepSteeringShadow(unittest.TestCase):
     self.assertEqual(self.rate4_shadow.snapshot().samples, 1)
     self.assertEqual(self.rate4_shadow.snapshot().samples, 0)
 
-  def test_diagnostic_has_no_output_path_and_jeep_rate4_is_explicit(self):
+  def test_diagnostic_has_no_output_path_and_jeep_rate5_is_explicit(self):
     shadow_source = SHADOW_PATH.read_text(encoding="utf-8")
     for forbidden in (
       "CANPacker",
@@ -241,26 +241,27 @@ class TestJeepSteeringShadow(unittest.TestCase):
 
     values_source = VALUES_PATH.read_text(encoding="utf-8")
     self.assertIn("self.STEER_MAX = 261", values_source)
-    self.assertIn("self.STEER_DELTA_UP = 4", values_source)
-    self.assertIn("self.STEER_DELTA_DOWN = 4", values_source)
+    self.assertIn("self.STEER_DELTA_UP = 5", values_source)
+    self.assertIn("self.STEER_DELTA_DOWN = 5", values_source)
     self.assertIn("CAR.JEEP_GRAND_CHEROKEE_2019", values_source)
 
     interface_source = INTERFACE_PATH.read_text(encoding="utf-8")
     self.assertIn(
       "ret.safetyConfigs[0].safetyParam |= "
-      "Panda.FLAG_CHRYSLER_JEEP_RATE4",
+      "Panda.FLAG_CHRYSLER_JEEP_RATE5",
       interface_source,
     )
     panda_source = PANDA_PY_PATH.read_text(encoding="utf-8")
-    self.assertIn("FLAG_CHRYSLER_JEEP_RATE4 = 8", panda_source)
+    self.assertIn("FLAG_CHRYSLER_JEEP_RATE5 = 32", panda_source)
+    self.assertIn("FLAG_CHRYSLER_JEEP_LONG_ACTUATION = 64", panda_source)
 
     controller_source = CONTROLLER_PATH.read_text(encoding="utf-8")
     self.assertIn(
-      "self.jeep_steering_rate4_shadow.update(",
+      "self.jeep_steering_rate5_shadow.update(",
       controller_source,
     )
     self.assertNotIn(
-      "apply_steer = self.jeep_steering_rate4_shadow",
+      "apply_steer = self.jeep_steering_rate5_shadow",
       controller_source,
     )
     self.assertIn("candidate_applied=True", controller_source)
@@ -288,23 +289,23 @@ class TestJeepSteeringShadow(unittest.TestCase):
       ),
     )
 
-    rate4_logging_methods = [
+    rate5_logging_methods = [
       node
       for node in ast.walk(controller_tree)
       if (
         isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and node.name == "log_jeep_steering_rate4_shadow"
+        and node.name == "log_jeep_steering_rate5_shadow"
       )
     ]
-    self.assertEqual(len(rate4_logging_methods), 1)
-    rate4_referenced_names = {
+    self.assertEqual(len(rate5_logging_methods), 1)
+    rate5_referenced_names = {
       node.id
-      for node in ast.walk(rate4_logging_methods[0])
+      for node in ast.walk(rate5_logging_methods[0])
       if isinstance(node, ast.Name)
     }
     self.assertTrue(
       {"can_sends", "new_actuators", "apply_steer"}.isdisjoint(
-        rate4_referenced_names,
+        rate5_referenced_names,
       ),
     )
 

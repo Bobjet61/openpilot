@@ -1,18 +1,17 @@
 from dataclasses import dataclass
 
 
-# Independent host-to-Panda transport gate. The b8v branch enables only the
-# private transport path; every transmitted actuator field is hard-coded
-# neutral and OP_LONG_ENABLE remains false.
+# Independent host-to-Panda transport gate.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
 
 # Tags Panda-rejected private frames in their USB rejection receipts. The tag
 # never reaches a vehicle CAN transmit queue and does not change acceptance.
 JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = True
 
-# Independent actuation gate. Enabling this without transport is invalid, and
-# both Panda layers retain their own hard-off actuation gates.
-JEEP_LONG_ACTUATION_COMPILED = False
+# Independent actuation gate. The embedded Panda and the external White Panda
+# each retain an independent fail-closed gate and validate the complete command
+# envelope before vehicle CAN is modified.
+JEEP_LONG_ACTUATION_COMPILED = True
 
 if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
   raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
@@ -30,6 +29,10 @@ ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
+
+# Match the White Panda's moving-only gate (raw wheel speed 29, approximately
+# 2.06 m/s). Stop, go, brake preparation, and hold remain unavailable.
+MIN_ACTIVE_SPEED_MPS = 2.1
 
 # The embedded Panda rejects private cycles closer than 15 ms. Leave 3 ms of
 # scheduling margin, and advance the counter only for cycles actually sent.
@@ -87,16 +90,19 @@ def jeep_long_shadow_safety_param(
   safety_param: int,
   shadow_flag: int,
   diagnostic_flag: int = 0,
+  actuation_flag: int = 0,
 ) -> int:
   if JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
     safety_param |= shadow_flag
     if JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED:
       safety_param |= diagnostic_flag
+    if JEEP_LONG_ACTUATION_COMPILED:
+      safety_param |= actuation_flag
   return safety_param
 
 
 class JeepLongitudinalShadow:
-  """Rate-limited candidate command generator with a hard compile-off gate."""
+  """Rate-limited command generator behind independent transport/safety gates."""
 
   def __init__(self):
     self.accel_last = 0.0

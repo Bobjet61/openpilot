@@ -183,20 +183,24 @@ class TestJeepRadarShadow(unittest.TestCase):
         ),
       )
 
-  def test_transport_probe_keeps_longitudinal_actuation_hard_off(self):
+  def test_b8y_longitudinal_actuation_uses_guarded_transport(self):
     long_source = LONG_PATH.read_text(encoding="utf-8")
     self.assertIn(
       "JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True",
       long_source,
     )
     self.assertIn(
-      "JEEP_LONG_ACTUATION_COMPILED = False",
+      "JEEP_LONG_ACTUATION_COMPILED = True",
       long_source,
     )
 
     controller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
     self.assertIn(
       "if transport_counter is not None:",
+      controller_source,
+    )
+    self.assertIn(
+      "can_sends.extend(self.jeep_long_shadow_frames)",
       controller_source,
     )
 
