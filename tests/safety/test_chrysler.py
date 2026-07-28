@@ -335,6 +335,15 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
 
+  def _enable_standstill_hold_source(self, counter=1):
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+    self.safety.set_controls_allowed(False)
+
   def _tx_private_cycle(self, counter, time_us, decel_raw=4094,
                         command_type=0, torque_raw=2000,
                         engine_request=False, enable=False):
@@ -588,6 +597,52 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._enable_safe_source()
     self.safety.set_timer(self.SOURCE_TIMEOUT_US + 1)
     self.assertFalse(self._tx(self._private_brake_msg(0)))
+
+  def test_standstill_exception_is_brake_only(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1, enable=True,
+      ),
+      (True, True, True),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source()
+    self.assertEqual(
+      self._tx_private_cycle(0, 0, enable=True),
+      (False, False, False),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2100, engine_request=True, enable=True,
+      ),
+      (False, False, False),
+    )
+
+  def test_standstill_hold_still_requires_main_and_clean_pedals(self):
+    for source_change in ("main_off", "gas", "brake", "collision"):
+      self._reset_long_shadow(actuation=True)
+      self._enable_standstill_hold_source()
+      if source_change == "main_off":
+        self.assertTrue(self._rx(self._das_3_msg(
+          counter=2, ACC_AVAILABLE=0, ACC_ACTIVE=0,
+        )))
+      elif source_change == "gas":
+        self.assertTrue(self._rx(self._user_gas_msg(1)))
+      elif source_change == "brake":
+        self.assertTrue(self._rx(self._user_brake_msg(True)))
+      else:
+        self.assertTrue(self._rx(self._das_3_msg(
+          counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0, ACC_DECEL_REQ=2,
+        )))
+      self.assertFalse(self._tx(self._private_brake_msg(
+        0, decel_raw=2866, command_type=1,
+      )), source_change)
 
   def test_private_brake_payload_rejection(self):
     invalid_messages = (

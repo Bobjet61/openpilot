@@ -305,18 +305,22 @@ static bool chrysler_long_fresh(const uint32_t now, const uint32_t last,
          (get_ts_elapsed(now, last) <= CHRYSLER_LONG_SOURCE_TIMEOUT_US);
 }
 
-static uint8_t chrysler_long_source_reject_reason(uint32_t *detail) {
+static uint8_t chrysler_long_source_reject_reason(
+    uint32_t *detail, const bool standstill_brake) {
   const uint32_t now = microsecond_timer_get();
   uint8_t reason = CHRYSLER_LONG_REJECT_NONE;
   *detail = 0U;
 
-  if (!controls_allowed) {
+  // A standstill exception can authorize only a complete brake cycle. It
+  // retains ACC-main, pedal, collision, freshness, integrity, and payload
+  // checks, and never authorizes engine torque.
+  if (!controls_allowed && !standstill_brake) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS;
-  } else if (!controls_allowed_long) {
+  } else if (!controls_allowed_long && !standstill_brake) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
   } else if (!acc_main_on) {
     reason = CHRYSLER_LONG_REJECT_ACC_MAIN;
-  } else if (!vehicle_moving) {
+  } else if (!vehicle_moving && !standstill_brake) {
     reason = CHRYSLER_LONG_REJECT_STOPPED;
   } else if (gas_pressed) {
     reason = CHRYSLER_LONG_REJECT_GAS;
@@ -364,20 +368,23 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
   const bool shadow_valid = chrysler_long_shadow_enabled;
   const bool platform_valid = chrysler_platform == CHRYSLER_PACIFICA;
   const bool stage_valid = chrysler_long_stage == 0U;
+  const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
+  const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) |
+                        GET_BYTE(to_send, 3);
+  const int command_type = (GET_BYTE(to_send, 4) >> 4) & 0x7U;
+  const bool standstill_brake =
+    !vehicle_moving && (command_type == 1);
   uint32_t source_detail = 0U;
   uint8_t source_reason = CHRYSLER_LONG_REJECT_NONE;
   if (shadow_valid && platform_valid && stage_valid) {
-    source_reason = chrysler_long_source_reject_reason(&source_detail);
+    source_reason = chrysler_long_source_reject_reason(
+      &source_detail, standstill_brake);
   }
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool checksum_valid =
     shadow_valid && platform_valid && stage_valid && source_valid &&
     chrysler_long_checksum_valid(to_send);
 
-  const uint8_t counter = (GET_BYTE(to_send, 6) >> 4) & 0xFU;
-  const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) |
-                        GET_BYTE(to_send, 3);
-  const int command_type = (GET_BYTE(to_send, 4) >> 4) & 0x7U;
   const bool acc_available_cmd = GET_BIT(to_send, 20U);
   const bool acc_enabled_cmd = GET_BIT(to_send, 21U);
   const bool brake_fields_valid =
@@ -471,7 +478,8 @@ static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
   const bool checksum_valid = chrysler_long_checksum_valid(to_send);
   uint32_t source_detail = 0U;
   const uint8_t source_reason =
-    chrysler_long_source_reject_reason(&source_detail);
+    chrysler_long_source_reject_reason(
+      &source_detail, !vehicle_moving && chrysler_long_brake_active);
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
@@ -521,7 +529,8 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
   const bool checksum_valid = chrysler_long_checksum_valid(to_send);
   uint32_t source_detail = 0U;
   const uint8_t source_reason =
-    chrysler_long_source_reject_reason(&source_detail);
+    chrysler_long_source_reject_reason(
+      &source_detail, !vehicle_moving && chrysler_long_brake_active);
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
     (GET_BYTE(to_send, 0) == 0U) &&
