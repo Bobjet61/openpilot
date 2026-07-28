@@ -204,6 +204,26 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       carcontroller_source,
     )
 
+  def test_stop_go_uses_unmodified_das4_for_stock_acc_acknowledgement(self):
+    carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
+    carstate_source = CARSTATE_PATH.read_text(encoding="utf-8")
+    self.assertIn(
+      "stock_acc_enabled=CS.stock_acc_enabled_raw",
+      carcontroller_source,
+    )
+    self.assertIn(
+      "cruise_available=CS.stock_acc_available_raw",
+      carcontroller_source,
+    )
+    self.assertIn(
+      "self.stock_acc_enabled_raw = self.stock_acc_state_raw == 4",
+      carstate_source,
+    )
+    self.assertIn(
+      "self.stock_acc_available_raw = self.stock_acc_state_raw in (3, 4)",
+      carstate_source,
+    )
+
   def test_transport_and_actuation_are_independent_fail_closed_gates(self):
     with (
       patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", True),

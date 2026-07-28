@@ -75,23 +75,58 @@ class TestJeepStopGoHold(unittest.TestCase):
     lead = self.update(frame=251, stock_acc_enabled=False, long_active=False,
                        lead_departure_confirmed=True)
     self.assertTrue(lead.send_resume)
-    self.assertFalse(lead.hold_command)
+    self.assertTrue(lead.hold_command)
     self.assertTrue(lead.launch_pending)
+    self.assertEqual(lead.reason, "resume_pending_hold")
 
-  def test_resume_release_is_short_and_rate_limited(self):
+  def test_resume_is_rate_limited_without_releasing_hold(self):
     self.update()
     first = self.update(frame=200, stock_acc_enabled=False, long_active=False,
                         lead_departure_confirmed=True)
     self.assertTrue(first.send_resume)
-    self.assertFalse(self.update(
+    self.assertTrue(first.hold_command)
+    rate_limited = self.update(
       frame=225, stock_acc_enabled=False, long_active=False,
       lead_departure_confirmed=True,
-    ).send_resume)
-    after_release = self.update(
+    )
+    self.assertFalse(rate_limited.send_resume)
+    self.assertTrue(rate_limited.hold_command)
+    still_holding = self.update(
       frame=251, stock_acc_enabled=False, long_active=False,
       lead_departure_confirmed=False,
     )
-    self.assertTrue(after_release.hold_command)
+    self.assertTrue(still_holding.hold_command)
+    self.assertTrue(still_holding.launch_pending)
+
+  def test_stock_acc_acknowledgement_ends_private_hold_before_launch(self):
+    self.update()
+    requested = self.update(
+      frame=200,
+      stock_acc_enabled=False,
+      long_active=False,
+      lead_departure_confirmed=True,
+    )
+    self.assertTrue(requested.hold_command)
+
+    acknowledged = self.update(
+      frame=201,
+      stock_acc_enabled=True,
+      long_active=False,
+      lead_departure_confirmed=False,
+    )
+    self.assertTrue(acknowledged.active)
+    self.assertFalse(acknowledged.hold_command)
+    self.assertFalse(acknowledged.launch_pending)
+    self.assertEqual(acknowledged.reason, "stock_holding")
+
+    launched = self.update(
+      frame=250,
+      stock_acc_enabled=True,
+      long_active=True,
+      standstill=False,
+      v_ego_mps=0.6,
+    )
+    self.assertFalse(launched.active)
 
   def test_driver_inputs_and_faults_release_immediately(self):
     for change in (
@@ -127,17 +162,39 @@ class TestJeepStopGoHold(unittest.TestCase):
     self.assertTrue(result.active)
     self.assertTrue(result.hold_command)
 
-  def test_sub_threshold_creep_reapplies_hold_without_launch(self):
+  def test_unacknowledged_roll_never_clears_hold(self):
     self.update()
     result = self.update(
       frame=200,
       stock_acc_enabled=False,
       long_active=False,
       standstill=False,
-      v_ego_mps=0.2,
+      v_ego_mps=1.0,
     )
     self.assertTrue(result.active)
     self.assertTrue(result.hold_command)
+
+  def test_resume_attempt_limit_keeps_brakes_applied(self):
+    self.update()
+    for attempt in range(STOP_GO.MAX_RESUME_ATTEMPTS):
+      result = self.update(
+        frame=200 + attempt * STOP_GO.RESUME_INTERVAL_FRAMES,
+        stock_acc_enabled=False,
+        long_active=False,
+        lead_departure_confirmed=True,
+      )
+      self.assertTrue(result.send_resume)
+      self.assertTrue(result.hold_command)
+
+    limited = self.update(
+      frame=200 + STOP_GO.MAX_RESUME_ATTEMPTS * STOP_GO.RESUME_INTERVAL_FRAMES,
+      stock_acc_enabled=False,
+      long_active=False,
+      lead_departure_confirmed=True,
+    )
+    self.assertFalse(limited.send_resume)
+    self.assertTrue(limited.hold_command)
+    self.assertEqual(limited.reason, "resume_limit_hold")
 
 
 if __name__ == "__main__":

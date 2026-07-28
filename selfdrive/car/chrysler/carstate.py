@@ -37,6 +37,9 @@ class CarState(CarStateBase):
     self.buttonStates = BUTTON_STATES.copy()
     self.buttonStatesPrev = BUTTON_STATES.copy()
     self.jeep_radar_shadow = JeepRadarShadow()
+    self.stock_acc_state_raw = 0
+    self.stock_acc_available_raw = False
+    self.stock_acc_enabled_raw = False
 
   def update(self, cp, cp_cam):
 
@@ -100,7 +103,14 @@ class CarState(CarStateBase):
     ret.cruiseState.available = cp_cruise.vl["DAS_3"]["ACC_AVAILABLE"] == 1
     ret.cruiseState.enabled = cp_cruise.vl["DAS_3"]["ACC_ACTIVE"] == 1
     ret.cruiseState.speed = cp_cruise.vl["DAS_4"]["ACC_SET_SPEED_KPH"] * CV.KPH_TO_MS
-    ret.cruiseState.nonAdaptive = cp_cruise.vl["DAS_4"]["ACC_STATE"] in (1, 2)  # 1 NormalCCOn and 2 NormalCCSet
+    self.stock_acc_state_raw = int(cp_cruise.vl["DAS_4"]["ACC_STATE"])
+    # The White Panda never replaces DAS_4. State 4 is stock adaptive ACC
+    # actively controlling; state 3 is the ready/main-on state after its
+    # standstill timeout. These raw states provide an acknowledgement that
+    # cannot be confused with our injected DAS_3 brake hold.
+    self.stock_acc_available_raw = self.stock_acc_state_raw in (3, 4)
+    self.stock_acc_enabled_raw = self.stock_acc_state_raw == 4
+    ret.cruiseState.nonAdaptive = self.stock_acc_state_raw in (1, 2)  # 1 NormalCCOn and 2 NormalCCSet
     ret.cruiseState.standstill = cp_cruise.vl["DAS_3"]["ACC_STANDSTILL"] == 1
     ret.accFaulted = cp_cruise.vl["DAS_3"]["ACC_FAULTED"] != 0
 

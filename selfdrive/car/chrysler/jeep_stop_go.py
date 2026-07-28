@@ -3,8 +3,8 @@
 The moving openpilot longitudinal path remains unchanged. This state machine
 only latches a stop that openpilot and stock ACC entered together, requests the
 already road-tested -2.0 m/s^2 standstill hold after stock ACC times out, and
-permits a short RESUME release window after independent vision/radar evidence
-that the lead departed.
+sends guarded RESUME requests after independent vision/radar evidence that the
+lead departed. The private hold remains applied until stock ACC acknowledges.
 """
 
 from dataclasses import dataclass
@@ -12,7 +12,6 @@ from dataclasses import dataclass
 
 HOLD_ACCEL_MPS2 = -2.0
 RESUME_INTERVAL_FRAMES = 50   # 0.5 seconds
-RESUME_RELEASE_FRAMES = 50    # release hold for 0.5 seconds after RESUME
 MAX_RESUME_ATTEMPTS = 10
 MOVE_RELEASE_SPEED_MPS = 0.5
 
@@ -32,16 +31,13 @@ class JeepStopGoHold:
 
   def __init__(self):
     self.active = False
-    self.start_frame = 0
     self.last_resume_frame = -RESUME_INTERVAL_FRAMES
-    self.launch_release_until_frame = -1
     self.resume_attempts = 0
     self.reason = "inactive"
 
   def _deactivate(self, reason: str) -> JeepStopGoResult:
     self.active = False
     self.resume_attempts = 0
-    self.launch_release_until_frame = -1
     self.reason = reason
     return JeepStopGoResult(
       active=False,
@@ -103,15 +99,17 @@ class JeepStopGoHold:
     )
     if entry:
       self.active = True
-      self.start_frame = frame
       self.last_resume_frame = frame - RESUME_INTERVAL_FRAMES
-      self.launch_release_until_frame = -1
       self.resume_attempts = 0
       self.reason = "latched"
 
     if not self.active:
       return self._deactivate("inactive")
-    if not standstill and v_ego_mps > MOVE_RELEASE_SPEED_MPS:
+    if (
+        stock_acc_enabled
+        and not standstill
+        and v_ego_mps > MOVE_RELEASE_SPEED_MPS
+    ):
       return self._deactivate("vehicle_moving")
 
     send_resume = False
@@ -124,26 +122,24 @@ class JeepStopGoHold:
     ):
       send_resume = True
       self.last_resume_frame = frame
-      self.launch_release_until_frame = frame + RESUME_RELEASE_FRAMES
       self.resume_attempts += 1
-      self.reason = "resume_release"
+      self.reason = "resume_requested"
 
-    launch_pending = frame <= self.launch_release_until_frame
-    stopped_for_hold = standstill or v_ego_mps <= MOVE_RELEASE_SPEED_MPS
+    # Never create an open-loop brake gap. A RESUME request is sent while the
+    # private brake-only hold remains active. The hold is removed only after
+    # stock ACC explicitly reports enabled and becomes the braking/launch gate.
+    launch_pending = self.resume_attempts > 0 and not stock_acc_enabled
     hold_command = (
       self.active
-      and stopped_for_hold
       and not stock_acc_enabled
-      and not launch_pending
     )
     if hold_command:
-      self.reason = "holding"
+      if self.resume_attempts >= MAX_RESUME_ATTEMPTS:
+        self.reason = "resume_limit_hold"
+      else:
+        self.reason = "resume_pending_hold" if launch_pending else "holding"
     elif stock_acc_enabled:
       self.reason = "stock_holding"
-    elif launch_pending:
-      self.reason = "resume_release"
-    elif self.resume_attempts >= MAX_RESUME_ATTEMPTS:
-      self.reason = "resume_limit"
     else:
       self.reason = "latched"
 

@@ -9,12 +9,13 @@ standstill hold and stock-ACC resume.
 - Below that threshold, stock ACC still performs the final approach.
 - If stock ACC times out at standstill, the private White Panda path applies
   the previously recorded `-2.0 m/s²` brake-only hold.
-- A resume request requires four consecutive new radar cycles in which the
+- A resume request requires eight consecutive new radar cycles in which the
   passive Jeep radar track and the independent vision lead both report that
   the lead is pulling away.
-- Hold is released for 0.5 seconds after each resume request and is restored
-  if the vehicle does not launch. Attempts are capped at ten; after that the
-  vehicle remains held until driver intervention.
+- RESUME is sent while the brake-only hold remains active. The private hold is
+  removed only after the unmodified stock DAS_4 state explicitly reports
+  adaptive ACC active and takes over as the braking/launch gate. Attempts are
+  capped at ten; after that the vehicle remains held until driver intervention.
 
 ## Fail-closed conditions
 
@@ -27,7 +28,7 @@ forbidden.
 
 ## Steering
 
-The applied steering calibration remains 261 maximum torque units at rate 5.
-A 270-unit candidate runs as telemetry only and has no CAN output. The route
-replay showed that raising the ceiling alone increased reversal lag, so the
-candidate is not applied in this branch.
+The applied Jeep steering calibration is 270 maximum torque units at rate 5,
+a 3.4% increase from the prior 261-unit ceiling. The rate and real-time torque
+envelopes remain unchanged. A 280-unit candidate runs as telemetry only and
+has no CAN output.
