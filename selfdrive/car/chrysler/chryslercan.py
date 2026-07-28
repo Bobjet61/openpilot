@@ -109,6 +109,7 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
   }
   dash_values = {
     "OP_LONG_ENABLE": envelope.host_enabled,
+    "OP_LONG_LAUNCH_ARM": envelope.launch_armed,
     "COUNTER": counter,
   }
   torque_values = {
@@ -138,6 +139,7 @@ def create_wp_long_transport_messages(packer, counter):
   }
   dash_values = {
     "OP_LONG_ENABLE": 0,
+    "OP_LONG_LAUNCH_ARM": 0,
     "COUNTER": counter,
   }
   torque_values = {

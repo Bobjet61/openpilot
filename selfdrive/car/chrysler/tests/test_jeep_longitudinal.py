@@ -23,6 +23,9 @@ LONG_SPEC.loader.exec_module(LONG)
 
 ACCEL_MAX = LONG.ACCEL_MAX
 ACCEL_MIN = LONG.ACCEL_MIN
+JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED = (
+  LONG.JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+)
 JEEP_LONG_ACTUATION_COMPILED = LONG.JEEP_LONG_ACTUATION_COMPILED
 JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = (
   LONG.JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED
@@ -58,6 +61,7 @@ class PrivateMessagePacker:
       dat[6] |= int(values.get("ACC_BRK_PREP", 0)) << 1
     elif name == "WP_ACC_DASH_CMD":
       dat[3] |= int(values.get("OP_LONG_ENABLE", 0))
+      dat[3] |= int(values.get("OP_LONG_LAUNCH_ARM", 0)) << 1
     elif name == "WP_ACC_TORQUE_CMD":
       torque_raw = round((values.get("ENGINE_TORQUE_REQUEST", -500.0) + 500.0) / 0.25)
       dat[4] |= int(values.get("ENGINE_TORQUE_REQUEST_MAX", 0)) << 7
@@ -103,6 +107,7 @@ def load_chryslercan():
 class TestJeepLongitudinalShadow(unittest.TestCase):
   def test_transport_and_actuation_are_compiled_on_for_b8y(self):
     self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
+    self.assertTrue(JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED)
     self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)
     self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
@@ -133,7 +138,11 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       carcontroller_source,
     )
     self.assertIn(
-      "if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:",
+      "and (CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS)",
+      carcontroller_source,
+    )
+    self.assertIn(
+      "low_speed=CS.out.vEgo < MIN_ACTIVE_SPEED_MPS",
       carcontroller_source,
     )
     self.assertIn("if not CC.longActive:", carcontroller_source)
@@ -198,7 +207,10 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "cruise_mismatch = CS.cruiseState.enabled and not self.enabled",
       controlsd_source,
     )
-    self.assertIn("elif CC.cruiseControl.resume:", carcontroller_source)
+    self.assertIn(
+      "elif CC.cruiseControl.resume and not full_long_low_speed_control:",
+      carcontroller_source,
+    )
     self.assertIn(
       "self.CP, resume=True))",
       carcontroller_source,
@@ -298,6 +310,80 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(strong.engine_active)
     self.assertFalse(weak.engine_active)
 
+  def test_low_speed_default_brakes_and_never_requests_engine(self):
+    shadow = JeepLongitudinalShadow()
+    result = shadow.update(
+      1.0,
+      eligible=True,
+      low_speed=True,
+      launch_armed=False,
+    )
+    self.assertTrue(result.brake_active)
+    self.assertFalse(result.engine_active)
+    self.assertLessEqual(
+      result.limited_accel,
+      LONG.LOW_SPEED_BRAKE_FLOOR_MPS2,
+    )
+    self.assertFalse(result.launch_armed)
+
+  def test_low_speed_launch_caps_accel_and_engine_torque(self):
+    shadow = JeepLongitudinalShadow()
+    result = None
+    for _ in range(100):
+      result = shadow.update(
+        1.0,
+        eligible=True,
+        low_speed=True,
+        launch_armed=True,
+      )
+    assert result is not None
+    self.assertTrue(result.engine_active)
+    self.assertTrue(result.launch_armed)
+    self.assertLessEqual(
+      result.limited_accel,
+      LONG.LOW_SPEED_LAUNCH_ACCEL_MAX,
+    )
+    self.assertLessEqual(
+      result.engine_torque_nm,
+      LONG.LOW_SPEED_LAUNCH_TORQUE_MAX_NM,
+    )
+
+  def test_launch_transition_releases_hold_before_capped_propulsion(self):
+    shadow = JeepLongitudinalShadow()
+    hold = shadow.update(
+      -2.0,
+      eligible=True,
+      standstill_hold=True,
+      low_speed=True,
+      launch_armed=False,
+    )
+    self.assertTrue(hold.brake_active)
+    self.assertEqual(hold.limited_accel, -2.0)
+
+    first_launch = shadow.update(
+      1.0,
+      eligible=True,
+      low_speed=True,
+      launch_armed=True,
+    )
+    self.assertFalse(first_launch.brake_active)
+    self.assertFalse(first_launch.engine_active)
+    self.assertGreaterEqual(first_launch.limited_accel, 0.0)
+
+    propulsion = first_launch
+    for _ in range(3):
+      propulsion = shadow.update(
+        1.0,
+        eligible=True,
+        low_speed=True,
+        launch_armed=True,
+      )
+    self.assertTrue(propulsion.engine_active)
+    self.assertLessEqual(
+      propulsion.engine_torque_nm,
+      LONG.LOW_SPEED_LAUNCH_TORQUE_MAX_NM,
+    )
+
   def test_committed_transport_adds_only_shadow_param(self):
     self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
     self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
@@ -395,6 +481,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual((brake[2][0] >> 5) & 0x3, 0)
     self.assertEqual((brake[2][6] >> 1) & 0x1, 0)
     self.assertEqual(dash[2][3] & 0x1, 1)
+    self.assertEqual((dash[2][3] >> 1) & 0x1, 0)
     self.assertEqual(torque[2][4] >> 7, 0)
     self.assertEqual(
       ((torque[2][4] & 0x7F) << 8) | torque[2][5],
@@ -407,6 +494,24 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertTrue(
       all(msg[2][7] == fca_checksum(msg[2])
           for msg in (brake, dash, torque)),
+    )
+
+  def test_launch_arm_is_authenticated_in_private_dashboard_frame(self):
+    chryslercan = load_chryslercan()
+    envelope = JeepLongitudinalShadow().update(
+      1.0,
+      eligible=True,
+      low_speed=True,
+      launch_armed=True,
+    )
+    _, dash, torque = chryslercan.create_wp_long_shadow_messages(
+      PrivateMessagePacker(), envelope, 9,
+    )
+    self.assertEqual(dash[2][3] & 0x3, 0x3)
+    self.assertEqual(dash[2][7], fca_checksum(dash[2]))
+    self.assertLessEqual(
+      ((torque[2][4] & 0x7F) << 8) | torque[2][5],
+      2160,
     )
 
   def test_transport_scheduler_enforces_margin_and_counts_only_sends(self):

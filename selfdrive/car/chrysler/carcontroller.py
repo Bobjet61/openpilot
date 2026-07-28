@@ -11,13 +11,19 @@ from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
+  JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED,
   JEEP_LONG_ACTUATION_COMPILED,
   MIN_ACTIVE_SPEED_MPS,
   JeepLongitudinalShadow,
   JeepLongitudinalTransportScheduler,
+  read_runtime_bool,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
-from openpilot.selfdrive.car.chrysler.jeep_stop_go import HOLD_ACCEL_MPS2, JeepStopGoHold
+from openpilot.selfdrive.car.chrysler.jeep_stop_go import (
+  HOLD_ACCEL_MPS2,
+  JeepFullLongLaunchGuard,
+  JeepStopGoHold,
+)
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
@@ -70,6 +76,8 @@ class CarController(CarControllerBase):
     self.jeep_lead_departure_cycles = 0
     self.jeep_stop_go = JeepStopGoHold()
     self.jeep_stop_go_result = None
+    self.jeep_full_long_launch = JeepFullLongLaunchGuard()
+    self.jeep_full_long_launch_result = None
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -106,6 +114,12 @@ class CarController(CarControllerBase):
 
     self.sm = messaging.SubMaster(['longitudinalPlanSP'])
     self.param_s = Params()
+    self.jeep_full_long_launch_param_path = self.param_s.get_param_path(
+      "JeepFullLongLaunch",
+    )
+    self.jeep_full_long_launch_enabled = read_runtime_bool(
+      self.jeep_full_long_launch_param_path,
+    )
     self.is_metric = self.param_s.get_bool("IsMetric")
     self.speed_limit_control_enabled = False
     self.last_speed_limit_sign_tap = False
@@ -136,6 +150,11 @@ class CarController(CarControllerBase):
     self.button_frame = 0
 
   def update(self, CC, CS, now_nanos):
+    if self.frame % 100 == 0:
+      self.jeep_full_long_launch_enabled = read_runtime_bool(
+        self.jeep_full_long_launch_param_path,
+      )
+
     if not self.CP.pcmCruiseSpeed:
       self.sm.update(0)
 
@@ -161,6 +180,7 @@ class CarController(CarControllerBase):
       supported=(
         self.CP.carFingerprint in JEEP_LONG_CARS
         and bool(self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20)
+        and not JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
       ),
       forward_gear=CS.out.gearShifter in FORWARD_GEARS,
       cruise_available=CS.stock_acc_available_raw,
@@ -208,10 +228,63 @@ class CarController(CarControllerBase):
       jeep_long_vehicle_eligible,
       jeep_long_vehicle_reason,
     )
+    plan_valid = (
+      self.jeep_long_plan_result.plan_valid
+      if self.jeep_long_plan_result is not None else False
+    )
+    plan_has_lead = (
+      self.jeep_long_plan_result.has_lead
+      if self.jeep_long_plan_result is not None else False
+    )
+    self.jeep_full_long_launch_result = self.jeep_full_long_launch.update(
+      frame=self.frame,
+      mode_enabled=self.jeep_full_long_launch_enabled,
+      supported=(
+        JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+        and self.CP.carFingerprint in JEEP_LONG_CARS
+        and bool(self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20)
+      ),
+      forward_gear=CS.out.gearShifter in FORWARD_GEARS,
+      cruise_available=CS.out.cruiseState.available,
+      controls_enabled=CC.enabled,
+      long_active=CC.longActive,
+      standstill=CS.out.standstill,
+      v_ego_mps=CS.out.vEgo,
+      requested_accel_mps2=CC.actuators.accel,
+      plan_valid=plan_valid,
+      plan_has_lead=plan_has_lead,
+      lead_departure_confirmed=(
+        self.jeep_lead_departure_cycles
+        >= LEAD_DEPARTURE_CONFIRM_CYCLES
+      ),
+      resume_pressed=CS.buttonStates["resumeCruise"],
+      cancel=CC.cruiseControl.cancel,
+      gas_pressed=CS.out.gasPressed,
+      brake_pressed=CS.out.brakePressed,
+      acc_faulted=CS.out.accFaulted,
+      stock_aeb=CS.out.stockAeb,
+    )
     if self.frame % 2 == 0:
+      plan_eligible = (
+        self.jeep_long_plan_result.eligible
+        if self.jeep_long_plan_result is not None else False
+      )
+      launch_armed = (
+        self.jeep_full_long_launch_result.armed
+        if self.jeep_full_long_launch_result is not None else False
+      )
       standstill_hold = (
-        self.jeep_stop_go_result is not None
-        and self.jeep_stop_go_result.hold_command
+        (
+          JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+          and jeep_long_vehicle_eligible
+          and CS.out.standstill
+          and not launch_armed
+        )
+        or (
+          not JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+          and self.jeep_stop_go_result is not None
+          and self.jeep_stop_go_result.hold_command
+        )
       )
       requested_accel = (
         (
@@ -223,15 +296,13 @@ class CarController(CarControllerBase):
           if self.jeep_long_plan_result is not None else 0.0
         )
       )
-      plan_eligible = (
-        self.jeep_long_plan_result.eligible
-        if self.jeep_long_plan_result is not None else False
-      )
       self.jeep_long_envelope = self.jeep_long_shadow.update(
         requested_accel,
         plan_eligible,
         standstill_hold=standstill_hold,
         hold_accel=HOLD_ACCEL_MPS2,
+        low_speed=CS.out.vEgo < MIN_ACTIVE_SPEED_MPS,
+        launch_armed=launch_armed,
       )
       self.jeep_long_shadow_frames = []
       self.jeep_long_transport_frames = []
@@ -261,6 +332,9 @@ class CarController(CarControllerBase):
         f"brake={self.jeep_long_envelope.brake_active}, "
         f"engine={self.jeep_long_envelope.engine_active}, "
         f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
+        f"low_speed={self.jeep_long_envelope.low_speed}, "
+        f"launch_armed={self.jeep_long_envelope.launch_armed}, "
+        f"launch_mode={self.jeep_full_long_launch_enabled}, "
         f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )
@@ -280,6 +354,11 @@ class CarController(CarControllerBase):
     das_bus = 2 if self.CP.carFingerprint in RAM_CARS else 0
     # cruise buttons
     resume_sent = False
+    full_long_low_speed_control = (
+      JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+      and self.jeep_long_envelope.host_enabled
+      and CS.out.vEgo < MIN_ACTIVE_SPEED_MPS
+    )
     if CS.button_counter != self.last_button_frame:
       self.last_button_frame = CS.button_counter
 
@@ -297,7 +376,7 @@ class CarController(CarControllerBase):
         can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + 1, das_bus, self.CP, cancel=True))
 
       # ACC resume from standstill
-      elif CC.cruiseControl.resume:
+      elif CC.cruiseControl.resume and not full_long_low_speed_control:
         self.last_button_frame = self.frame
         can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + 1, das_bus, self.CP, resume=True))
         resume_sent = True
@@ -321,6 +400,7 @@ class CarController(CarControllerBase):
         self.jeep_stop_go_result is not None
         and self.jeep_stop_go_result.send_resume
         and not resume_sent
+        and not full_long_low_speed_control
     ):
       can_sends.append(chryslercan.create_cruise_buttons(
         self.packer,
@@ -440,7 +520,10 @@ class CarController(CarControllerBase):
       return False, "gear"
     if not CS.out.cruiseState.available:
       return False, "cruise_unavailable"
-    if not CS.out.cruiseState.enabled:
+    if (
+        not JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+        and not CS.out.cruiseState.enabled
+    ):
       return False, "stock_acc_inactive"
     if CS.out.accFaulted:
       return False, "acc_fault"
@@ -450,7 +533,10 @@ class CarController(CarControllerBase):
       return False, "gas_pressed"
     if CS.out.stockAeb:
       return False, "stock_aeb"
-    if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:
+    if (
+        not JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
+        and (CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS)
+    ):
       return False, "not_moving"
     return True, "eligible"
 
@@ -698,10 +784,14 @@ class CarController(CarControllerBase):
     )
 
   def log_jeep_stop_go(self, CS):
-    if self.jeep_stop_go_result is None:
+    if (
+        self.jeep_stop_go_result is None
+        or self.jeep_full_long_launch_result is None
+    ):
       return
 
     result = self.jeep_stop_go_result
+    launch = self.jeep_full_long_launch_result
     cloudlog.info(
       f"Jeep stop go: active={result.active},"
       f"hold={result.hold_command},"
@@ -709,6 +799,10 @@ class CarController(CarControllerBase):
       f"launch_pending={result.launch_pending},"
       f"reason={result.reason},"
       f"resume_attempts={result.resume_attempts},"
+      f"full_long_mode={self.jeep_full_long_launch_enabled},"
+      f"full_long_launch_armed={launch.armed},"
+      f"full_long_launch_reason={launch.reason},"
+      f"full_long_launch_arm_frame={launch.arm_frame},"
       f"lead_departure_cycles={self.jeep_lead_departure_cycles},"
       f"stock_acc_state_raw={CS.stock_acc_state_raw},"
       f"steer_max_applied={self.params.STEER_MAX},"

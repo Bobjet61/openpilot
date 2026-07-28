@@ -84,6 +84,7 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
       engine_torque_nm=0.0,
       eligible=True,
       host_enabled=False,
+      launch_armed=False,
     )
     _, disabled_dash, _ = chryslercan.create_wp_long_shadow_messages(
       self.packer, envelope, 0,
@@ -102,6 +103,13 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
       hypothetical_enabled_dash[2][7],
       fca_checksum(hypothetical_enabled_dash[2]),
     )
+
+    envelope.launch_armed = True
+    _, launch_dash, _ = chryslercan.create_wp_long_shadow_messages(
+      self.packer, envelope, 2,
+    )
+    self.assertEqual(launch_dash[2][3] & 0x3, 0x3)
+    self.assertEqual(launch_dash[2][7], fca_checksum(launch_dash[2]))
 
   def test_transport_probe_is_strictly_neutral(self):
     brake, dash, torque = chryslercan.create_wp_long_transport_messages(

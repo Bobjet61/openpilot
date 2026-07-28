@@ -12,6 +12,7 @@ JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = True
 # each retain an independent fail-closed gate and validate the complete command
 # envelope before vehicle CAN is modified.
 JEEP_LONG_ACTUATION_COMPILED = True
+JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED = True
 
 if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
   raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
@@ -30,9 +31,13 @@ COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
 
-# Match the White Panda's moving-only gate (raw wheel speed 29, approximately
-# 2.06 m/s). Stop, go, brake preparation, and hold remain unavailable.
-MIN_ACTIVE_SPEED_MPS = 2.1
+# Match the White Panda's low-speed boundary (raw wheel speed 29,
+# approximately 2.06 m/s). A small host-side margin ensures the launch bit is
+# removed before either Panda changes to its normal moving envelope.
+MIN_ACTIVE_SPEED_MPS = 2.05
+LOW_SPEED_BRAKE_FLOOR_MPS2 = -0.06
+LOW_SPEED_LAUNCH_ACCEL_MAX = 0.5
+LOW_SPEED_LAUNCH_TORQUE_MAX_NM = 40.0
 
 # The embedded Panda rejects private cycles closer than 15 ms. Leave 3 ms of
 # scheduling margin, and advance the counter only for cycles actually sent.
@@ -43,6 +48,15 @@ TRANSPORT_MIN_SEND_INTERVAL_NS = 18_000_000
 VEHICLE_MASS_SCALE_KG = 1200.0
 NON_HYBRID_GEAR_RATIO = 15.5
 ENGINE_TORQUE_MAX_NM = 100.0
+
+
+def read_runtime_bool(path: str) -> bool:
+  """Read an intentionally unregistered developer toggle, failing closed."""
+  try:
+    with open(path, "rb") as param_file:
+      return param_file.read(1) == b"1"
+  except OSError:
+    return False
 
 
 def fca_checksum(dat: bytes) -> int:
@@ -78,6 +92,8 @@ class JeepLongitudinalEnvelope:
   engine_active: bool
   engine_torque_nm: float
   standstill_hold: bool
+  low_speed: bool
+  launch_armed: bool
   transport_enabled: bool
   host_enabled: bool
   eligible: bool
@@ -107,6 +123,7 @@ class JeepLongitudinalShadow:
 
   def __init__(self):
     self.accel_last = 0.0
+    self.launch_armed_last = False
 
   def update(
       self,
@@ -115,12 +132,20 @@ class JeepLongitudinalShadow:
       *,
       standstill_hold: bool = False,
       hold_accel: float = -2.0,
+      low_speed: bool = False,
+      launch_armed: bool = False,
   ) -> JeepLongitudinalEnvelope:
     requested_accel = clip(requested_accel, ACCEL_MIN, ACCEL_MAX)
 
+    if low_speed and launch_armed and not self.launch_armed_last:
+      # A deliberate RESUME is the authorization to release the standstill
+      # brake. Start the launch ramp from neutral so the first authenticated
+      # cycle is not rejected as a simultaneous brake/launch request.
+      self.accel_last = 0.0
+
     if standstill_hold:
-      # The hold value is the exact bounded command validated on the previous
-      # B6 road tests. It is intentionally not a low-speed propulsion mode.
+      # Keep a closed-loop brake command through standstill. Propulsion remains
+      # unavailable unless the separate RESUME launch handshake is armed.
       limited_accel = clip(hold_accel, ACCEL_MIN, -0.5)
     elif not eligible:
       limited_accel = 0.0
@@ -128,20 +153,32 @@ class JeepLongitudinalShadow:
       lower = self.accel_last - JERK_DOWN * COMMAND_DT
       upper = self.accel_last + JERK_UP * COMMAND_DT
       limited_accel = clip(requested_accel, lower, upper)
+      if low_speed and launch_armed:
+        limited_accel = min(limited_accel, LOW_SPEED_LAUNCH_ACCEL_MAX)
+      elif low_speed:
+        # Default b9f mode owns braking through zero but never supplies
+        # propulsion. A small brake floor prevents a neutral low-speed private
+        # cycle from dropping the independent Panda guards.
+        limited_accel = min(limited_accel, LOW_SPEED_BRAKE_FLOOR_MPS2)
 
     self.accel_last = limited_accel
+    self.launch_armed_last = launch_armed
     command_eligible = eligible or standstill_hold
     brake_active = command_eligible and limited_accel < -ACCEL_DEADBAND
     engine_active = (
       eligible
       and not standstill_hold
+      and (not low_speed or launch_armed)
       and limited_accel > ACCEL_DEADBAND
     )
     engine_torque_nm = (
       clip(
         limited_accel * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO,
         0.0,
-        ENGINE_TORQUE_MAX_NM,
+        (
+          LOW_SPEED_LAUNCH_TORQUE_MAX_NM
+          if low_speed else ENGINE_TORQUE_MAX_NM
+        ),
       )
       if engine_active else 0.0
     )
@@ -157,6 +194,8 @@ class JeepLongitudinalShadow:
       engine_active=engine_active,
       engine_torque_nm=engine_torque_nm,
       standstill_hold=standstill_hold,
+      low_speed=low_speed,
+      launch_armed=launch_armed,
       transport_enabled=transport_enabled,
       host_enabled=JEEP_LONG_ACTUATION_COMPILED and transport_enabled,
       eligible=command_eligible,

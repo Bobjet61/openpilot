@@ -197,5 +197,112 @@ class TestJeepStopGoHold(unittest.TestCase):
     self.assertEqual(limited.reason, "resume_limit_hold")
 
 
+class TestJeepFullLongLaunchGuard(unittest.TestCase):
+  def setUp(self):
+    self.guard = STOP_GO.JeepFullLongLaunchGuard()
+    self.base = {
+      "frame": 100,
+      "mode_enabled": True,
+      "supported": True,
+      "forward_gear": True,
+      "cruise_available": True,
+      "controls_enabled": True,
+      "long_active": True,
+      "standstill": True,
+      "v_ego_mps": 0.0,
+      "requested_accel_mps2": 0.5,
+      "plan_valid": True,
+      "plan_has_lead": True,
+      "lead_departure_confirmed": True,
+      "resume_pressed": False,
+      "cancel": False,
+      "gas_pressed": False,
+      "brake_pressed": False,
+      "acc_faulted": False,
+      "stock_aeb": False,
+    }
+
+  def update(self, **changes):
+    values = self.base.copy()
+    values.update(changes)
+    return self.guard.update(**values)
+
+  def arm(self):
+    return self.update(resume_pressed=True)
+
+  def test_defaults_to_unarmed_and_requires_resume_rising_edge(self):
+    self.assertFalse(self.update().armed)
+    self.assertTrue(self.arm().armed)
+    self.assertTrue(self.update(frame=101, resume_pressed=True).armed)
+
+    self.guard = STOP_GO.JeepFullLongLaunchGuard()
+    self.assertFalse(self.update(
+      resume_pressed=True,
+      lead_departure_confirmed=False,
+    ).armed)
+    self.assertFalse(self.update(
+      frame=101,
+      resume_pressed=True,
+      lead_departure_confirmed=True,
+    ).armed)
+
+  def test_arm_requires_stopped_valid_positive_lead_plan(self):
+    for change in (
+      {"standstill": False},
+      {"v_ego_mps": 0.3},
+      {"requested_accel_mps2": 0.0},
+      {"plan_valid": False},
+      {"plan_has_lead": False},
+      {"lead_departure_confirmed": False},
+    ):
+      self.guard = STOP_GO.JeepFullLongLaunchGuard()
+      self.assertFalse(self.update(resume_pressed=True, **change).armed, change)
+
+  def test_launch_is_one_shot_and_times_out(self):
+    self.assertTrue(self.arm().armed)
+    self.assertTrue(self.update(
+      frame=100 + STOP_GO.FULL_LONG_LAUNCH_WINDOW_FRAMES - 1,
+      standstill=False,
+      v_ego_mps=1.0,
+    ).armed)
+    timed_out = self.update(
+      frame=100 + STOP_GO.FULL_LONG_LAUNCH_WINDOW_FRAMES,
+      standstill=False,
+      v_ego_mps=1.0,
+    )
+    self.assertFalse(timed_out.armed)
+    self.assertEqual(timed_out.reason, "launch_timeout")
+
+  def test_launch_completes_at_low_speed_boundary(self):
+    self.assertTrue(self.arm().armed)
+    complete = self.update(
+      frame=200,
+      standstill=False,
+      v_ego_mps=STOP_GO.FULL_LONG_LAUNCH_COMPLETE_MPS,
+    )
+    self.assertFalse(complete.armed)
+    self.assertEqual(complete.reason, "launch_complete")
+
+  def test_every_hazard_disarms(self):
+    for change in (
+      {"mode_enabled": False},
+      {"supported": False},
+      {"forward_gear": False},
+      {"cruise_available": False},
+      {"controls_enabled": False},
+      {"long_active": False},
+      {"plan_valid": False},
+      {"plan_has_lead": False},
+      {"cancel": True},
+      {"gas_pressed": True},
+      {"brake_pressed": True},
+      {"acc_faulted": True},
+      {"stock_aeb": True},
+    ):
+      self.guard = STOP_GO.JeepFullLongLaunchGuard()
+      self.assertTrue(self.arm().armed)
+      self.assertFalse(self.update(frame=101, **change).armed, change)
+
+
 if __name__ == "__main__":
   unittest.main()

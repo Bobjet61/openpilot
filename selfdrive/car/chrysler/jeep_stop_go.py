@@ -14,6 +14,9 @@ HOLD_ACCEL_MPS2 = -2.0
 RESUME_INTERVAL_FRAMES = 50   # 0.5 seconds
 MAX_RESUME_ATTEMPTS = 10
 MOVE_RELEASE_SPEED_MPS = 0.5
+FULL_LONG_LAUNCH_WINDOW_FRAMES = 800  # 8 seconds at 100 Hz
+FULL_LONG_LAUNCH_COMPLETE_MPS = 2.05
+FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS = 0.2
 
 
 @dataclass(frozen=True)
@@ -151,3 +154,110 @@ class JeepStopGoHold:
       reason=self.reason,
       resume_attempts=self.resume_attempts,
     )
+
+
+@dataclass(frozen=True)
+class JeepFullLongLaunchResult:
+  armed: bool
+  reason: str
+  arm_frame: int
+
+
+class JeepFullLongLaunchGuard:
+  """One-shot manual launch authorization for b9f low-speed propulsion."""
+
+  def __init__(self):
+    self.armed = False
+    self.arm_frame = -1
+    self.resume_pressed_prev = False
+    self.reason = "mode_disabled"
+
+  def _result(self) -> JeepFullLongLaunchResult:
+    return JeepFullLongLaunchResult(
+      armed=self.armed,
+      reason=self.reason,
+      arm_frame=self.arm_frame,
+    )
+
+  def _disarm(self, reason: str) -> JeepFullLongLaunchResult:
+    self.armed = False
+    self.arm_frame = -1
+    self.reason = reason
+    return self._result()
+
+  def update(
+      self,
+      *,
+      frame: int,
+      mode_enabled: bool,
+      supported: bool,
+      forward_gear: bool,
+      cruise_available: bool,
+      controls_enabled: bool,
+      long_active: bool,
+      standstill: bool,
+      v_ego_mps: float,
+      requested_accel_mps2: float,
+      plan_valid: bool,
+      plan_has_lead: bool,
+      lead_departure_confirmed: bool,
+      resume_pressed: bool,
+      cancel: bool,
+      gas_pressed: bool,
+      brake_pressed: bool,
+      acc_faulted: bool,
+      stock_aeb: bool,
+  ) -> JeepFullLongLaunchResult:
+    resume_rising = resume_pressed and not self.resume_pressed_prev
+    self.resume_pressed_prev = resume_pressed
+
+    if not mode_enabled:
+      return self._disarm("mode_disabled")
+    if not supported:
+      return self._disarm("unsupported")
+    if cancel:
+      return self._disarm("cancel")
+    if gas_pressed:
+      return self._disarm("gas")
+    if brake_pressed:
+      return self._disarm("brake")
+    if not forward_gear:
+      return self._disarm("gear")
+    if not cruise_available:
+      return self._disarm("cruise_unavailable")
+    if not controls_enabled:
+      return self._disarm("controls_disabled")
+    if not long_active:
+      return self._disarm("long_controls_inactive")
+    if acc_faulted:
+      return self._disarm("acc_fault")
+    if stock_aeb:
+      return self._disarm("stock_aeb")
+    if not plan_valid:
+      return self._disarm("plan_invalid")
+    if self.armed and not plan_has_lead:
+      return self._disarm("lead_lost")
+    if self.armed and v_ego_mps >= FULL_LONG_LAUNCH_COMPLETE_MPS:
+      return self._disarm("launch_complete")
+    if (
+        self.armed
+        and frame - self.arm_frame >= FULL_LONG_LAUNCH_WINDOW_FRAMES
+    ):
+      return self._disarm("launch_timeout")
+
+    can_arm = (
+      resume_rising
+      and standstill
+      and v_ego_mps <= FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS
+      and plan_has_lead
+      and lead_departure_confirmed
+      and requested_accel_mps2 > 0.05
+    )
+    if can_arm:
+      self.armed = True
+      self.arm_frame = frame
+      self.reason = "physical_resume_armed"
+    elif not self.armed:
+      self.reason = "awaiting_physical_resume"
+
+    return self._result()
