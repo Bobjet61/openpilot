@@ -17,6 +17,7 @@ from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   JeepLongitudinalTransportScheduler,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
+from openpilot.selfdrive.car.chrysler.jeep_stop_go import HOLD_ACCEL_MPS2, JeepStopGoHold
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
@@ -28,6 +29,8 @@ JEEP_LONG_CARS = {
   CAR.JEEP_GRAND_CHEROKEE,
   CAR.JEEP_GRAND_CHEROKEE_2019,
 }
+JEEP_TORQUE_CANDIDATE_MAX = 270
+LEAD_DEPARTURE_CONFIRM_CYCLES = 4
 
 
 class CarController(CarControllerBase):
@@ -62,6 +65,9 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_selection = None
     self.jeep_radar_shadow_vision = None
     self.jeep_radar_shadow_reason_counts = Counter()
+    self.jeep_lead_departure_cycles = 0
+    self.jeep_stop_go = JeepStopGoHold()
+    self.jeep_stop_go_result = None
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -80,6 +86,16 @@ class CarController(CarControllerBase):
         steer_max=self.params.STEER_MAX,
         candidate_delta_up=5,
         candidate_delta_down=5,
+        steer_error_max=self.params.STEER_ERROR_MAX,
+        installed_delta_limit=self.params.STEER_DELTA_UP,
+      )
+      if CP.carFingerprint in JEEP_LONG_CARS else None
+    )
+    self.jeep_steering_270_shadow = (
+      JeepSteeringRateCandidateShadow(
+        steer_max=JEEP_TORQUE_CANDIDATE_MAX,
+        candidate_delta_up=self.params.STEER_DELTA_UP,
+        candidate_delta_down=self.params.STEER_DELTA_DOWN,
         steer_error_max=self.params.STEER_ERROR_MAX,
         installed_delta_limit=self.params.STEER_DELTA_UP,
       )
@@ -138,6 +154,34 @@ class CarController(CarControllerBase):
 
     can_sends = []
     self.update_jeep_radar_shadow(CS)
+    self.jeep_stop_go_result = self.jeep_stop_go.update(
+      frame=self.frame,
+      supported=(
+        self.CP.carFingerprint in JEEP_LONG_CARS
+        and bool(self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20)
+      ),
+      forward_gear=CS.out.gearShifter in FORWARD_GEARS,
+      cruise_available=CS.out.cruiseState.available,
+      stock_acc_enabled=CS.out.cruiseState.enabled,
+      controls_enabled=CC.enabled,
+      long_active=CC.longActive,
+      standstill=CS.out.standstill,
+      v_ego_mps=CS.out.vEgo,
+      stopping=(
+        CC.actuators.longControlState
+        == car.CarControl.Actuators.LongControlState.stopping
+      ),
+      requested_accel_mps2=CC.actuators.accel,
+      lead_departure_confirmed=(
+        self.jeep_lead_departure_cycles
+        >= LEAD_DEPARTURE_CONFIRM_CYCLES
+      ),
+      cancel=CC.cruiseControl.cancel,
+      gas_pressed=CS.out.gasPressed,
+      brake_pressed=CS.out.brakePressed,
+      acc_faulted=CS.out.accFaulted,
+      stock_aeb=CS.out.stockAeb,
+    )
 
     if not self.CP.pcmCruiseSpeed:
       if not self.last_speed_limit_sign_tap_prev and self.last_speed_limit_sign_tap:
@@ -163,8 +207,15 @@ class CarController(CarControllerBase):
       jeep_long_vehicle_reason,
     )
     if self.frame % 2 == 0:
+      standstill_hold = (
+        self.jeep_stop_go_result is not None
+        and self.jeep_stop_go_result.hold_command
+      )
       requested_accel = (
-        CC.actuators.accel
+        (
+          HOLD_ACCEL_MPS2
+          if standstill_hold else CC.actuators.accel
+        )
         if JEEP_LONG_ACTUATION_COMPILED else (
           self.jeep_long_plan_result.controller_accel_mps2
           if self.jeep_long_plan_result is not None else 0.0
@@ -177,6 +228,8 @@ class CarController(CarControllerBase):
       self.jeep_long_envelope = self.jeep_long_shadow.update(
         requested_accel,
         plan_eligible,
+        standstill_hold=standstill_hold,
+        hold_accel=HOLD_ACCEL_MPS2,
       )
       self.jeep_long_shadow_frames = []
       self.jeep_long_transport_frames = []
@@ -213,6 +266,8 @@ class CarController(CarControllerBase):
       self.log_jeep_radar_shadow(CS)
       self.log_jeep_steering_shadow()
       self.log_jeep_steering_rate5_shadow()
+      self.log_jeep_steering_270_shadow()
+      self.log_jeep_stop_go()
 
     if self.frame % 10 == 0 and self.CP.carFingerprint not in RAM_CARS:
       can_sends.append(chryslercan.create_lkas_heartbit(self.packer, CS.lkas_disabled, CS.lkas_heartbit))
@@ -222,6 +277,7 @@ class CarController(CarControllerBase):
 
     das_bus = 2 if self.CP.carFingerprint in RAM_CARS else 0
     # cruise buttons
+    resume_sent = False
     if CS.button_counter != self.last_button_frame:
       self.last_button_frame = CS.button_counter
 
@@ -242,6 +298,7 @@ class CarController(CarControllerBase):
       elif CC.cruiseControl.resume:
         self.last_button_frame = self.frame
         can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + 1, das_bus, self.CP, resume=True))
+        resume_sent = True
 
 
       if not (CC.cruiseControl.cancel or CC.cruiseControl.resume) and not self.CP.pcmCruiseSpeed and CS.out.cruiseState.enabled:
@@ -257,6 +314,19 @@ class CarController(CarControllerBase):
             can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter, das_bus, self.CP, buttons=self.cruise_button))
           elif button_counter_offset is not None:
             can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + button_counter_offset, das_bus, self.CP, buttons=self.cruise_button))
+
+    if (
+        self.jeep_stop_go_result is not None
+        and self.jeep_stop_go_result.send_resume
+        and not resume_sent
+    ):
+      can_sends.append(chryslercan.create_cruise_buttons(
+        self.packer,
+        CS.button_counter + 1,
+        0,
+        self.CP,
+        resume=True,
+      ))
 
     # HUD alerts
     if self.frame % 25 == 0:
@@ -329,6 +399,15 @@ class CarController(CarControllerBase):
       if self.jeep_steering_rate5_shadow is not None:
         self.jeep_steering_rate5_shadow.update(
           requested_raw=new_steer,
+          installed_applied_raw=apply_steer,
+          eps_torque=CS.out.steeringTorqueEps,
+          control_allowed=control_allowed,
+        )
+      if self.jeep_steering_270_shadow is not None:
+        self.jeep_steering_270_shadow.update(
+          requested_raw=int(round(
+            CC.actuators.steer * JEEP_TORQUE_CANDIDATE_MAX,
+          )),
           installed_applied_raw=apply_steer,
           eps_torque=CS.out.steeringTorqueEps,
           control_allowed=control_allowed,
@@ -444,6 +523,18 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_selection = selection
     self.jeep_radar_shadow_vision = vision
     self.jeep_radar_shadow_reason_counts[selection.reason] += 1
+    if (
+        selection.track is not None
+        and vision.eligible
+        and selection.track.v_rel > 0.30
+        and vision.v_rel > 0.20
+    ):
+      self.jeep_lead_departure_cycles = min(
+        self.jeep_lead_departure_cycles + 1,
+        LEAD_DEPARTURE_CONFIRM_CYCLES,
+      )
+    else:
+      self.jeep_lead_departure_cycles = 0
 
   def log_jeep_long_plan_shadow(self, CS):
     if (
@@ -578,6 +669,47 @@ class CarController(CarControllerBase):
       f"mean_gap_rate5={window.mean_candidate_request_gap:.3f},"
       f"applied_rate={self.params.STEER_DELTA_UP},candidate_rate=5,"
       f"candidate_applied=True"
+    )
+
+  def log_jeep_steering_270_shadow(self):
+    if self.jeep_steering_270_shadow is None:
+      return
+
+    window = self.jeep_steering_270_shadow.snapshot()
+    cloudlog.info(
+      f"Jeep steer torque270 shadow: samples={window.samples},"
+      f"active={window.active_samples},"
+      f"changed={window.changed_samples},"
+      f"improved={window.improved_samples},"
+      f"worse={window.worse_samples},"
+      f"equal={window.equal_samples},"
+      f"panda_rate_violation="
+      f"{window.current_panda_rate_violation_samples},"
+      f"candidate_at_270={window.candidate_ceiling_samples},"
+      f"max_candidate={window.max_candidate_raw},"
+      f"max_delta={window.max_candidate_delta},"
+      f"max_divergence={window.max_candidate_divergence},"
+      f"mean_gap_261={window.mean_current_request_gap:.3f},"
+      f"mean_gap_270={window.mean_candidate_request_gap:.3f},"
+      f"applied_max={self.params.STEER_MAX},candidate_max="
+      f"{JEEP_TORQUE_CANDIDATE_MAX},candidate_applied=False"
+    )
+
+  def log_jeep_stop_go(self):
+    if self.jeep_stop_go_result is None:
+      return
+
+    result = self.jeep_stop_go_result
+    cloudlog.info(
+      f"Jeep stop go: active={result.active},"
+      f"hold={result.hold_command},"
+      f"resume={result.send_resume},"
+      f"launch_pending={result.launch_pending},"
+      f"reason={result.reason},"
+      f"resume_attempts={result.resume_attempts},"
+      f"lead_departure_cycles={self.jeep_lead_departure_cycles},"
+      f"steer_max_applied={self.params.STEER_MAX},"
+      f"steer_max_candidate={JEEP_TORQUE_CANDIDATE_MAX}"
     )
 
   # multikyd methods, sunnyhaibin logic

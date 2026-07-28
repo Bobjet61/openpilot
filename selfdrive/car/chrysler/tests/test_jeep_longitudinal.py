@@ -242,6 +242,42 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       self.assertFalse(result.transport_enabled)
       self.assertFalse(result.host_enabled)
 
+  def test_standstill_hold_is_brake_only_and_transport_enabled(self):
+    result = JeepLongitudinalShadow().update(
+      1.0,
+      eligible=False,
+      standstill_hold=True,
+      hold_accel=-2.0,
+    )
+    self.assertTrue(result.standstill_hold)
+    self.assertTrue(result.eligible)
+    self.assertTrue(result.transport_enabled)
+    self.assertTrue(result.host_enabled)
+    self.assertTrue(result.brake_active)
+    self.assertFalse(result.engine_active)
+    self.assertEqual(result.engine_torque_nm, 0.0)
+    self.assertEqual(result.limited_accel, -2.0)
+
+  def test_standstill_hold_stays_inside_deceleration_envelope(self):
+    strong = JeepLongitudinalShadow().update(
+      -20.0,
+      eligible=False,
+      standstill_hold=True,
+      hold_accel=-20.0,
+    )
+    weak = JeepLongitudinalShadow().update(
+      20.0,
+      eligible=False,
+      standstill_hold=True,
+      hold_accel=20.0,
+    )
+    self.assertEqual(strong.limited_accel, ACCEL_MIN)
+    self.assertEqual(weak.limited_accel, -0.5)
+    self.assertTrue(strong.brake_active)
+    self.assertTrue(weak.brake_active)
+    self.assertFalse(strong.engine_active)
+    self.assertFalse(weak.engine_active)
+
   def test_committed_transport_adds_only_shadow_param(self):
     self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
     self.assertEqual(jeep_long_shadow_safety_param(2, 4), 6)
@@ -315,6 +351,38 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual(
       tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)),
       (13, 13, 13),
+    )
+    self.assertTrue(
+      all(msg[2][7] == fca_checksum(msg[2])
+          for msg in (brake, dash, torque)),
+    )
+
+  def test_standstill_hold_bytes_request_brake_without_engine_torque(self):
+    chryslercan = load_chryslercan()
+    envelope = JeepLongitudinalShadow().update(
+      1.0,
+      eligible=False,
+      standstill_hold=True,
+      hold_accel=-2.0,
+    )
+    brake, dash, torque = chryslercan.create_wp_long_shadow_messages(
+      PrivateMessagePacker(), envelope, 7,
+    )
+
+    self.assertEqual(((brake[2][2] & 0xF) << 8) | brake[2][3], 2866)
+    self.assertEqual((brake[2][4] >> 4) & 0x7, 1)
+    self.assertEqual((brake[2][2] >> 4) & 0x3, 0x3)
+    self.assertEqual((brake[2][0] >> 5) & 0x3, 0)
+    self.assertEqual((brake[2][6] >> 1) & 0x1, 0)
+    self.assertEqual(dash[2][3] & 0x1, 1)
+    self.assertEqual(torque[2][4] >> 7, 0)
+    self.assertEqual(
+      ((torque[2][4] & 0x7F) << 8) | torque[2][5],
+      2000,
+    )
+    self.assertEqual(
+      tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)),
+      (7, 7, 7),
     )
     self.assertTrue(
       all(msg[2][7] == fca_checksum(msg[2])

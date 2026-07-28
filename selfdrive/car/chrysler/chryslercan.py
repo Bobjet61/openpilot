@@ -91,7 +91,7 @@ def make_wp_private_message(packer, name, values):
 
 
 def create_wp_long_shadow_messages(packer, envelope, counter):
-  """Pack calibrated moving-only Jeep commands for the White Panda guard."""
+  """Pack moving commands or the brake-only standstill hold."""
   counter %= 0x10
   brake_values = {
     "ACC_STOP": 0,

@@ -77,6 +77,7 @@ class JeepLongitudinalEnvelope:
   brake_active: bool
   engine_active: bool
   engine_torque_nm: float
+  standstill_hold: bool
   transport_enabled: bool
   host_enabled: bool
   eligible: bool
@@ -107,10 +108,21 @@ class JeepLongitudinalShadow:
   def __init__(self):
     self.accel_last = 0.0
 
-  def update(self, requested_accel: float, eligible: bool) -> JeepLongitudinalEnvelope:
+  def update(
+      self,
+      requested_accel: float,
+      eligible: bool,
+      *,
+      standstill_hold: bool = False,
+      hold_accel: float = -2.0,
+  ) -> JeepLongitudinalEnvelope:
     requested_accel = clip(requested_accel, ACCEL_MIN, ACCEL_MAX)
 
-    if not eligible:
+    if standstill_hold:
+      # The hold value is the exact bounded command validated on the previous
+      # B6 road tests. It is intentionally not a low-speed propulsion mode.
+      limited_accel = clip(hold_accel, ACCEL_MIN, -0.5)
+    elif not eligible:
       limited_accel = 0.0
     else:
       lower = self.accel_last - JERK_DOWN * COMMAND_DT
@@ -118,8 +130,13 @@ class JeepLongitudinalShadow:
       limited_accel = clip(requested_accel, lower, upper)
 
     self.accel_last = limited_accel
-    brake_active = eligible and limited_accel < -ACCEL_DEADBAND
-    engine_active = eligible and limited_accel > ACCEL_DEADBAND
+    command_eligible = eligible or standstill_hold
+    brake_active = command_eligible and limited_accel < -ACCEL_DEADBAND
+    engine_active = (
+      eligible
+      and not standstill_hold
+      and limited_accel > ACCEL_DEADBAND
+    )
     engine_torque_nm = (
       clip(
         limited_accel * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO,
@@ -129,16 +146,20 @@ class JeepLongitudinalShadow:
       if engine_active else 0.0
     )
 
-    transport_enabled = JEEP_LONG_SHADOW_TRANSPORT_COMPILED and eligible
+    transport_enabled = (
+      JEEP_LONG_SHADOW_TRANSPORT_COMPILED
+      and command_eligible
+    )
     return JeepLongitudinalEnvelope(
       requested_accel=requested_accel,
       limited_accel=limited_accel,
       brake_active=brake_active,
       engine_active=engine_active,
       engine_torque_nm=engine_torque_nm,
+      standstill_hold=standstill_hold,
       transport_enabled=transport_enabled,
       host_enabled=JEEP_LONG_ACTUATION_COMPILED and transport_enabled,
-      eligible=eligible,
+      eligible=command_eligible,
     )
 
 

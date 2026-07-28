@@ -265,6 +265,12 @@ class TestJeepSteeringShadow(unittest.TestCase):
       controller_source,
     )
     self.assertIn("candidate_applied=True", controller_source)
+    self.assertIn("JEEP_TORQUE_CANDIDATE_MAX = 270", controller_source)
+    self.assertIn("candidate_applied=False", controller_source)
+    self.assertIn(
+      "new_steer = int(round(CC.actuators.steer * self.params.STEER_MAX))",
+      controller_source,
+    )
 
     controller_tree = ast.parse(
       CONTROLLER_PATH.read_text(encoding="utf-8"),
