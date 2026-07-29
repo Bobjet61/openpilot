@@ -30,34 +30,55 @@ static int chrysler_long_brake_counter = 0;
 static int chrysler_long_dash_counter = 0;
 static int chrysler_long_torque_counter = 0;
 static int chrysler_long_vehicle_speed_raw = 0;
+static uint16_t chrysler_long_guard_failure_mask = 0xFFFFU;
+static uint8_t chrysler_long_diag_status = CHRYSLER_LONG_DIAG_SIGNATURE;
+static uint16_t chrysler_long_diag_failure_mask = 0xFFFFU;
+static uint8_t chrysler_long_diag_counters = 0U;
 
 static void chrysler_long_update_guard(void) {
   const uint32_t now = TIM2->CNT;
-  const bool messages_fresh =
+  const bool brake_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_brake_ts,
-                           chrysler_long_brake_valid, CHRYSLER_LONG_BRAKE_TIMEOUT_US) &&
+                           chrysler_long_brake_valid, CHRYSLER_LONG_BRAKE_TIMEOUT_US);
+  const bool dash_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_dash_ts,
-                           chrysler_long_dash_valid, CHRYSLER_LONG_DASH_TIMEOUT_US) &&
+                           chrysler_long_dash_valid, CHRYSLER_LONG_DASH_TIMEOUT_US);
+  const bool torque_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_torque_ts,
-                           chrysler_long_torque_valid, CHRYSLER_LONG_TORQUE_TIMEOUT_US) &&
+                           chrysler_long_torque_valid, CHRYSLER_LONG_TORQUE_TIMEOUT_US);
+  const bool speed_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_speed_ts,
-                           chrysler_long_speed_valid, CHRYSLER_LONG_SPEED_TIMEOUT_US) &&
+                           chrysler_long_speed_valid, CHRYSLER_LONG_SPEED_TIMEOUT_US);
+  const bool gas_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_gas_pedal_ts,
-                           chrysler_long_gas_pedal_valid, CHRYSLER_LONG_GAS_PEDAL_TIMEOUT_US) &&
+                           chrysler_long_gas_pedal_valid, CHRYSLER_LONG_GAS_PEDAL_TIMEOUT_US);
+  const bool brake_pedal_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_brake_pedal_ts,
-                           chrysler_long_brake_pedal_valid, CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US) &&
+                           chrysler_long_brake_pedal_valid, CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US);
+  const bool stock_acc_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_stock_acc_ts,
-                           chrysler_long_stock_acc_valid, CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US) &&
+                           chrysler_long_stock_acc_valid, CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US);
+  const bool counters_aligned = chrysler_long_counters_aligned(
+    chrysler_long_brake_counter_seen, chrysler_long_brake_counter,
+    chrysler_long_dash_counter_seen, chrysler_long_dash_counter,
+    chrysler_long_torque_counter_seen, chrysler_long_torque_counter);
+  const bool private_integrity_valid =
     chrysler_long_brake_counter_valid &&
     chrysler_long_dash_counter_valid &&
     chrysler_long_torque_counter_valid &&
     chrysler_long_brake_checksum_valid &&
     chrysler_long_dash_checksum_valid &&
-    chrysler_long_torque_checksum_valid &&
-    chrysler_long_counters_aligned(
-      chrysler_long_brake_counter_seen, chrysler_long_brake_counter,
-      chrysler_long_dash_counter_seen, chrysler_long_dash_counter,
-      chrysler_long_torque_counter_seen, chrysler_long_torque_counter);
+    chrysler_long_torque_checksum_valid;
+  const bool messages_fresh =
+    brake_fresh &&
+    dash_fresh &&
+    torque_fresh &&
+    speed_fresh &&
+    gas_fresh &&
+    brake_pedal_fresh &&
+    stock_acc_fresh &&
+    counters_aligned &&
+    private_integrity_valid;
 
   const bool commands_valid = chrysler_long_commands_valid(
     chrysler_long_host_requested,
@@ -75,6 +96,24 @@ static void chrysler_long_update_guard(void) {
     chrysler_long_driver_gas,
     org_collision_active);
 
+  chrysler_long_guard_failure_mask = chrysler_long_diagnostic_mask(
+    CHRYSLER_LONG_ACTUATION != 0U,
+    chrysler_long_host_requested,
+    brake_fresh,
+    dash_fresh,
+    torque_fresh,
+    speed_fresh,
+    gas_fresh,
+    brake_pedal_fresh,
+    stock_acc_fresh,
+    counters_aligned,
+    private_integrity_valid,
+    chrysler_long_vehicle_speed_raw >= CHRYSLER_LONG_MOVING_SPEED_MIN_RAW,
+    chrysler_long_driver_brake,
+    chrysler_long_driver_gas,
+    org_collision_active,
+    commands_valid);
+  // Keep the b6y actuation decision independent from diagnostic packing.
   is_oplong_enabled = (CHRYSLER_LONG_ACTUATION != 0U) &&
                       messages_fresh && commands_valid;
 }
@@ -194,7 +233,20 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   int crc;
   chrysler_long_update_guard();
 
-  if (is_oplong_enabled && !org_collision_active) {
+  const bool applied = is_oplong_enabled && !org_collision_active;
+  const int stock_counter = (GET_BYTE(to_fwd, 6) >> 4) & 0xF;
+  chrysler_long_diag_status =
+    CHRYSLER_LONG_DIAG_SIGNATURE |
+    (applied ? CHRYSLER_LONG_DIAG_APPLIED : 0U) |
+    (chrysler_long_host_requested ? CHRYSLER_LONG_DIAG_HOST_REQUESTED : 0U) |
+    ((command_type == 1) ? CHRYSLER_LONG_DIAG_BRAKE_REQUESTED : 0U) |
+    (engine_torque_request_max ? CHRYSLER_LONG_DIAG_ENGINE_REQUESTED : 0U);
+  chrysler_long_diag_failure_mask = chrysler_long_guard_failure_mask;
+  chrysler_long_diag_counters =
+    (uint8_t)(((chrysler_long_brake_counter & 0xF) << 4) |
+              (stock_counter & 0xF));
+
+  if (applied) {
     // Preserve the two stock DAS_3 byte-2 bits that are outside the private
     // protocol. Replace propulsion and braking in this one diesel DAS_3 frame.
     to_fwd->RDLR &= 0x00C00000U;
@@ -258,7 +310,11 @@ static void send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
 }
 
 void chrysler_wp(void) {
-  CAN1->sTxMailBox[0].TDLR = 0x00;
+  CAN1->sTxMailBox[0].TDLR =
+    (uint32_t)chrysler_long_diag_status |
+    (uint32_t)(chrysler_long_diag_failure_mask & 0xFFU) << 8 |
+    (uint32_t)((chrysler_long_diag_failure_mask >> 8) & 0xFFU) << 16 |
+    (uint32_t)chrysler_long_diag_counters << 24;
   CAN1->sTxMailBox[0].TDTR = 4;
   CAN1->sTxMailBox[0].TIR = (0x4FFU << 21) | 1U;
 }

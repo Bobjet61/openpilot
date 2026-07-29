@@ -81,5 +81,25 @@ int main(void) {
     0, false, false,
     2100, 100, false, false, false));
 
+  assert(chrysler_long_diagnostic_mask(
+    true, true, true, true, true, true, true, true, true, true, true,
+    true, false, false, false, true) == 0U);
+
+  const uint16_t all_failures = chrysler_long_diagnostic_mask(
+    false, false, false, false, false, false, false, false, false,
+    false, false, false, true, true, true, false);
+  assert(all_failures == 0xFFFFU);
+
+  assert(chrysler_long_diagnostic_mask(
+    true, true, true, true, true, true, true, true, true, true, true,
+    false, false, false, false, false) ==
+    (CHRYSLER_LONG_DIAG_SPEED_TOO_LOW |
+     CHRYSLER_LONG_DIAG_COMMAND_ENVELOPE));
+  assert(chrysler_long_diagnostic_mask(
+    true, true, true, true, true, true, true, true, true, true, true,
+    true, true, false, false, false) ==
+    (CHRYSLER_LONG_DIAG_DRIVER_BRAKE |
+     CHRYSLER_LONG_DIAG_COMMAND_ENVELOPE));
+
   return 0;
 }

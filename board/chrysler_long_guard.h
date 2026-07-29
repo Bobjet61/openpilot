@@ -34,6 +34,33 @@
 // standstill, stop, go, brake preparation, and hold behavior.
 #define CHRYSLER_LONG_MOVING_SPEED_MIN_RAW 29  // approximately 2.06 m/s
 
+// The existing 0x4FF White Panda beacon remains four bytes long. Its first
+// byte keeps a fixed high-nibble signature and four outcome bits; the middle
+// two bytes carry this diagnostic failure mask. This changes no CAN identifier,
+// payload length, or actuation field and never participates in guard logic.
+#define CHRYSLER_LONG_DIAG_SIGNATURE 0xB0U
+#define CHRYSLER_LONG_DIAG_APPLIED (1U << 0)
+#define CHRYSLER_LONG_DIAG_HOST_REQUESTED (1U << 1)
+#define CHRYSLER_LONG_DIAG_BRAKE_REQUESTED (1U << 2)
+#define CHRYSLER_LONG_DIAG_ENGINE_REQUESTED (1U << 3)
+
+#define CHRYSLER_LONG_DIAG_ACTUATION_DISABLED (1U << 0)
+#define CHRYSLER_LONG_DIAG_HOST_NOT_REQUESTED (1U << 1)
+#define CHRYSLER_LONG_DIAG_BRAKE_NOT_FRESH (1U << 2)
+#define CHRYSLER_LONG_DIAG_DASH_NOT_FRESH (1U << 3)
+#define CHRYSLER_LONG_DIAG_TORQUE_NOT_FRESH (1U << 4)
+#define CHRYSLER_LONG_DIAG_SPEED_NOT_FRESH (1U << 5)
+#define CHRYSLER_LONG_DIAG_GAS_NOT_FRESH (1U << 6)
+#define CHRYSLER_LONG_DIAG_BRAKE_PEDAL_NOT_FRESH (1U << 7)
+#define CHRYSLER_LONG_DIAG_STOCK_ACC_NOT_FRESH (1U << 8)
+#define CHRYSLER_LONG_DIAG_COUNTERS_MISALIGNED (1U << 9)
+#define CHRYSLER_LONG_DIAG_PRIVATE_INTEGRITY (1U << 10)
+#define CHRYSLER_LONG_DIAG_SPEED_TOO_LOW (1U << 11)
+#define CHRYSLER_LONG_DIAG_DRIVER_BRAKE (1U << 12)
+#define CHRYSLER_LONG_DIAG_DRIVER_GAS (1U << 13)
+#define CHRYSLER_LONG_DIAG_COLLISION (1U << 14)
+#define CHRYSLER_LONG_DIAG_COMMAND_ENVELOPE (1U << 15)
+
 static inline bool chrysler_long_is_fresh(const uint32_t now, const uint32_t last,
                                           const bool valid, const uint32_t timeout_us) {
   return valid && ((uint32_t)(now - last) <= timeout_us);
@@ -94,6 +121,43 @@ static inline bool chrysler_long_commands_valid(
   }
 
   return valid;
+}
+
+static inline uint16_t chrysler_long_diagnostic_mask(
+    const bool actuation_enabled,
+    const bool host_requested,
+    const bool brake_fresh,
+    const bool dash_fresh,
+    const bool torque_fresh,
+    const bool speed_fresh,
+    const bool gas_fresh,
+    const bool brake_pedal_fresh,
+    const bool stock_acc_fresh,
+    const bool counters_aligned,
+    const bool private_integrity_valid,
+    const bool speed_high_enough,
+    const bool driver_brake,
+    const bool driver_gas,
+    const bool stock_collision,
+    const bool commands_valid) {
+  uint16_t mask = 0U;
+  mask |= actuation_enabled ? 0U : CHRYSLER_LONG_DIAG_ACTUATION_DISABLED;
+  mask |= host_requested ? 0U : CHRYSLER_LONG_DIAG_HOST_NOT_REQUESTED;
+  mask |= brake_fresh ? 0U : CHRYSLER_LONG_DIAG_BRAKE_NOT_FRESH;
+  mask |= dash_fresh ? 0U : CHRYSLER_LONG_DIAG_DASH_NOT_FRESH;
+  mask |= torque_fresh ? 0U : CHRYSLER_LONG_DIAG_TORQUE_NOT_FRESH;
+  mask |= speed_fresh ? 0U : CHRYSLER_LONG_DIAG_SPEED_NOT_FRESH;
+  mask |= gas_fresh ? 0U : CHRYSLER_LONG_DIAG_GAS_NOT_FRESH;
+  mask |= brake_pedal_fresh ? 0U : CHRYSLER_LONG_DIAG_BRAKE_PEDAL_NOT_FRESH;
+  mask |= stock_acc_fresh ? 0U : CHRYSLER_LONG_DIAG_STOCK_ACC_NOT_FRESH;
+  mask |= counters_aligned ? 0U : CHRYSLER_LONG_DIAG_COUNTERS_MISALIGNED;
+  mask |= private_integrity_valid ? 0U : CHRYSLER_LONG_DIAG_PRIVATE_INTEGRITY;
+  mask |= speed_high_enough ? 0U : CHRYSLER_LONG_DIAG_SPEED_TOO_LOW;
+  mask |= driver_brake ? CHRYSLER_LONG_DIAG_DRIVER_BRAKE : 0U;
+  mask |= driver_gas ? CHRYSLER_LONG_DIAG_DRIVER_GAS : 0U;
+  mask |= stock_collision ? CHRYSLER_LONG_DIAG_COLLISION : 0U;
+  mask |= commands_valid ? 0U : CHRYSLER_LONG_DIAG_COMMAND_ENVELOPE;
+  return mask;
 }
 
 #endif
