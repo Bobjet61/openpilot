@@ -163,6 +163,7 @@ class JeepStopGoHold:
 @dataclass(frozen=True)
 class JeepFullLongLaunchResult:
   armed: bool
+  hold_active: bool
   send_resume: bool
   reason: str
   arm_frame: int
@@ -174,6 +175,7 @@ class JeepFullLongLaunchGuard:
 
   def __init__(self):
     self.armed = False
+    self.hold_active = False
     self.arm_frame = -1
     self.handshake_pending = False
     self.handshake_frame = -1
@@ -184,6 +186,7 @@ class JeepFullLongLaunchGuard:
   def _result(self, send_resume: bool = False) -> JeepFullLongLaunchResult:
     return JeepFullLongLaunchResult(
       armed=self.armed,
+      hold_active=self.hold_active,
       send_resume=send_resume,
       reason=self.reason,
       arm_frame=self.arm_frame,
@@ -192,6 +195,7 @@ class JeepFullLongLaunchGuard:
 
   def _disarm(self, reason: str) -> JeepFullLongLaunchResult:
     self.armed = False
+    self.hold_active = False
     self.arm_frame = -1
     self.handshake_pending = False
     self.handshake_frame = -1
@@ -262,6 +266,15 @@ class JeepFullLongLaunchGuard:
     ):
       return self._disarm("launch_timeout")
 
+    # Keep applying the strong brake hold through only a tiny amount of creep.
+    # Propulsion authorization still begins only from exact standstill below.
+    if self.armed:
+      self.hold_active = False
+    elif standstill and v_ego_mps <= FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS:
+      self.hold_active = True
+    elif v_ego_mps > FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS:
+      self.hold_active = False
+
     can_begin_handshake = (
       not self.armed
       and not self.handshake_pending
@@ -301,6 +314,7 @@ class JeepFullLongLaunchGuard:
         self.last_resume_frame = -AUTO_LAUNCH_RESUME_INTERVAL_FRAMES
         self.resume_attempts = 0
         self.armed = True
+        self.hold_active = False
         self.arm_frame = frame
         self.reason = "auto_lead_departure_armed"
         return self._result()

@@ -162,6 +162,14 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "ret.pcmCruise = not JEEP_LONG_ACTUATION_COMPILED",
       interface_source,
     )
+    self.assertIn(
+      "ret.pcmCruiseSpeed = not JEEP_LONG_ACTUATION_COMPILED",
+      interface_source,
+    )
+    self.assertIn(
+      "and not full_long_low_speed_control",
+      carcontroller_source,
+    )
 
     planner_source = PLANNER_PATH.read_text(encoding="utf-8")
     self.assertIn(

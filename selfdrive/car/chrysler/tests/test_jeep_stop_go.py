@@ -258,7 +258,51 @@ class TestJeepFullLongLaunchGuard(unittest.TestCase):
     self.assertEqual(waiting.reason, "awaiting_lead_departure")
 
   def test_arm_helper(self):
-    self.assertTrue(self.arm().armed)
+    armed = self.arm()
+    self.assertTrue(armed.armed)
+    self.assertFalse(armed.hold_active)
+
+  def test_brake_hold_recovery_latch_is_bounded(self):
+    waiting = self.update(
+      lead_departure_confirmed=False,
+      requested_accel_mps2=-1.0,
+    )
+    self.assertTrue(waiting.hold_active)
+
+    creeping = self.update(
+      frame=101,
+      standstill=False,
+      v_ego_mps=STOP_GO.FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS,
+      lead_departure_confirmed=False,
+      requested_accel_mps2=-1.0,
+    )
+    self.assertTrue(creeping.hold_active)
+    self.assertFalse(creeping.armed)
+    self.assertFalse(creeping.send_resume)
+
+    outside_recovery = self.update(
+      frame=102,
+      standstill=False,
+      v_ego_mps=STOP_GO.FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS + 0.01,
+      lead_departure_confirmed=False,
+      requested_accel_mps2=-1.0,
+    )
+    self.assertFalse(outside_recovery.hold_active)
+
+  def test_brake_hold_recovery_latch_clears_on_driver_brake(self):
+    waiting = self.update(
+      lead_departure_confirmed=False,
+      requested_accel_mps2=-1.0,
+    )
+    self.assertTrue(waiting.hold_active)
+    interrupted = self.update(
+      frame=101,
+      lead_departure_confirmed=False,
+      requested_accel_mps2=-1.0,
+      brake_pressed=True,
+    )
+    self.assertFalse(interrupted.hold_active)
+    self.assertEqual(interrupted.reason, "brake")
 
   def test_arm_requires_stopped_valid_positive_lead_plan(self):
     for change in (

@@ -263,11 +263,15 @@ class CarController(CarControllerBase):
         self.jeep_full_long_launch_result.armed
         if self.jeep_full_long_launch_result is not None else False
       )
+      full_long_hold_active = (
+        self.jeep_full_long_launch_result.hold_active
+        if self.jeep_full_long_launch_result is not None else False
+      )
       standstill_hold = (
         (
           JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
           and jeep_long_vehicle_eligible
-          and CS.out.standstill
+          and full_long_hold_active
           and not launch_armed
         )
         or (
@@ -372,7 +376,12 @@ class CarController(CarControllerBase):
         resume_sent = True
 
 
-      if not (CC.cruiseControl.cancel or CC.cruiseControl.resume) and not self.CP.pcmCruiseSpeed and CS.out.cruiseState.enabled:
+      if (
+          not (CC.cruiseControl.cancel or CC.cruiseControl.resume)
+          and not self.CP.pcmCruiseSpeed
+          and CS.out.cruiseState.enabled
+          and not full_long_low_speed_control
+      ):
         self.button_frame += 1
         button_counter_offset = [1, 1, 0, None][self.button_frame % 4]
         if ram_cars:
@@ -805,6 +814,7 @@ class CarController(CarControllerBase):
       f"resume_attempts={result.resume_attempts},"
       f"full_long_mode={self.jeep_full_long_launch_enabled},"
       f"full_long_launch_armed={launch.armed},"
+      f"full_long_hold_active={launch.hold_active},"
       f"full_long_launch_reason={launch.reason},"
       f"full_long_launch_arm_frame={launch.arm_frame},"
       f"full_long_auto_resume={launch.send_resume},"
