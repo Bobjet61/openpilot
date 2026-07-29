@@ -247,6 +247,15 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     values = {"SPEED_LEFT": speed, "SPEED_RIGHT": speed}
     return self.packer.make_can_msg_panda("SPEED_1", 0, values)
 
+  @staticmethod
+  def _speed_raw_msg(speed_raw):
+    dat = bytearray(8)
+    dat[0] = (speed_raw >> 4) & 0xFF
+    dat[1] = (speed_raw & 0xF) << 4
+    dat[2] = (speed_raw >> 4) & 0xFF
+    dat[3] = (speed_raw & 0xF) << 4
+    return common.make_msg(0, 514, dat=dat)
+
   def _user_gas_msg(self, gas):
     values = {"Accelerator_Position": gas}
     return self.packer.make_can_msg_panda("ECM_5", 0, values)
@@ -343,11 +352,11 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
 
-  def _enable_standstill_hold_source(self, counter=1):
+  def _enable_standstill_hold_source(self, counter=1, speed_raw=0):
     self.assertTrue(self._rx(self._das_3_msg(
       counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=0,
     )))
-    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertTrue(self._rx(self._speed_raw_msg(speed_raw)))
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
     self.safety.set_controls_allowed(False)
@@ -630,6 +639,36 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._enable_standstill_hold_source()
     self.assertEqual(
       self._tx_private_cycle(0, 0, enable=True),
+      (False, False, False),
+    )
+
+  def test_low_speed_hold_recovery_is_bounded_and_brake_only(self):
+    for speed_raw in (1, 2, 3):
+      self._reset_long_shadow(actuation=True)
+      self._enable_standstill_hold_source(speed_raw=speed_raw)
+      self.assertEqual(
+        self._tx_private_cycle(
+          0, 0, decel_raw=2866, command_type=1, enable=True,
+        ),
+        (True, True, True),
+        speed_raw,
+      )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source(speed_raw=4)
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1, enable=True,
+      ),
+      (False, False, False),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source(speed_raw=1)
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2001, engine_request=True, enable=True,
+      ),
       (False, False, False),
     )
 

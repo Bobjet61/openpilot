@@ -57,6 +57,7 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
 #define CHRYSLER_LONG_TORQUE_MAX_RAW 2400
 #define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2160
+#define CHRYSLER_LONG_HOLD_RECOVERY_MAX_RAW 3
 #define CHRYSLER_LONG_MOVING_SPEED_MIN_RAW 29
 #define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US 15000U
@@ -343,24 +344,32 @@ static void chrysler_long_update_launch_state(void) {
   }
 }
 
+static bool chrysler_long_hold_recovery_allowed(const bool brake_active) {
+  // Wheel-speed raw units are about 0.071 m/s. Permit a brake-only hold
+  // through at most 0.21 m/s of creep; this never authorizes engine torque.
+  return brake_active &&
+         (chrysler_long_vehicle_speed_raw <=
+          CHRYSLER_LONG_HOLD_RECOVERY_MAX_RAW);
+}
+
 static uint8_t chrysler_long_source_reject_reason(
-    uint32_t *detail, const bool standstill_brake,
+    uint32_t *detail, const bool low_speed_brake_hold,
     const bool launch_authorized) {
   const uint32_t now = microsecond_timer_get();
   uint8_t reason = CHRYSLER_LONG_REJECT_NONE;
   *detail = 0U;
 
-  // A standstill exception can authorize only a complete brake cycle. It
+  // A bounded low-speed exception can authorize only a complete brake cycle. It
   // retains ACC-main, pedal, collision, freshness, integrity, and payload
   // checks, and never authorizes engine torque.
-  if (!controls_allowed && !standstill_brake && !launch_authorized) {
+  if (!controls_allowed && !low_speed_brake_hold && !launch_authorized) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS;
-  } else if (!controls_allowed_long && !standstill_brake &&
+  } else if (!controls_allowed_long && !low_speed_brake_hold &&
              !launch_authorized) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
   } else if (!acc_main_on) {
     reason = CHRYSLER_LONG_REJECT_ACC_MAIN;
-  } else if (!vehicle_moving && !standstill_brake && !launch_authorized) {
+  } else if (!vehicle_moving && !low_speed_brake_hold && !launch_authorized) {
     reason = CHRYSLER_LONG_REJECT_STOPPED;
   } else if (gas_pressed) {
     reason = CHRYSLER_LONG_REJECT_GAS;
@@ -415,8 +424,8 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
   const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) |
                         GET_BYTE(to_send, 3);
   const int command_type = (GET_BYTE(to_send, 4) >> 4) & 0x7U;
-  const bool standstill_brake =
-    !vehicle_moving && (command_type == 1);
+  const bool low_speed_brake_hold =
+    chrysler_long_hold_recovery_allowed(command_type == 1);
   const bool launch_candidate =
     !vehicle_moving && (command_type == 0) &&
     (chrysler_long_launch_active ||
@@ -425,7 +434,7 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
   uint8_t source_reason = CHRYSLER_LONG_REJECT_NONE;
   if (shadow_valid && platform_valid && stage_valid) {
     source_reason = chrysler_long_source_reject_reason(
-      &source_detail, standstill_brake, launch_candidate);
+      &source_detail, low_speed_brake_hold, launch_candidate);
   }
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool checksum_valid =
@@ -535,7 +544,8 @@ static bool chrysler_long_dash_tx_allowed(const CANPacket_t *to_send) {
   uint32_t source_detail = 0U;
   const uint8_t source_reason =
     chrysler_long_source_reject_reason(
-      &source_detail, !vehicle_moving && chrysler_long_brake_active,
+      &source_detail,
+      chrysler_long_hold_recovery_allowed(chrysler_long_brake_active),
       launch_request && launch_authorized);
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
   const bool payload_valid =
@@ -603,7 +613,8 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
   uint32_t source_detail = 0U;
   const uint8_t source_reason =
     chrysler_long_source_reject_reason(
-      &source_detail, !vehicle_moving && chrysler_long_brake_active,
+      &source_detail,
+      chrysler_long_hold_recovery_allowed(chrysler_long_brake_active),
       chrysler_long_launch_requested_cycle &&
       chrysler_long_launch_active);
   const bool source_valid = source_reason == CHRYSLER_LONG_REJECT_NONE;
