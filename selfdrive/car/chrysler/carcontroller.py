@@ -16,7 +16,6 @@ from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   MIN_ACTIVE_SPEED_MPS,
   JeepLongitudinalShadow,
   JeepLongitudinalTransportScheduler,
-  read_runtime_bool,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
 from openpilot.selfdrive.car.chrysler.jeep_stop_go import (
@@ -114,11 +113,8 @@ class CarController(CarControllerBase):
 
     self.sm = messaging.SubMaster(['longitudinalPlanSP'])
     self.param_s = Params()
-    self.jeep_full_long_launch_param_path = self.param_s.get_param_path(
-      "JeepFullLongLaunch",
-    )
-    self.jeep_full_long_launch_enabled = read_runtime_bool(
-      self.jeep_full_long_launch_param_path,
+    self.jeep_full_long_launch_enabled = (
+      JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED
     )
     self.is_metric = self.param_s.get_bool("IsMetric")
     self.speed_limit_control_enabled = False
@@ -150,11 +146,6 @@ class CarController(CarControllerBase):
     self.button_frame = 0
 
   def update(self, CC, CS, now_nanos):
-    if self.frame % 100 == 0:
-      self.jeep_full_long_launch_enabled = read_runtime_bool(
-        self.jeep_full_long_launch_param_path,
-      )
-
     if not self.CP.pcmCruiseSpeed:
       self.sm.update(0)
 

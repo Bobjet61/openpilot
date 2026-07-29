@@ -127,6 +127,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       ),
       1,
     )
+
     self.assertEqual(
       carcontroller_source.count(
         "can_sends.extend(self.jeep_long_shadow_frames)",
@@ -175,6 +176,16 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "can_sends.extend",
     ):
       self.assertNotIn(forbidden, planner_source)
+
+  def test_full_long_launch_does_not_require_runtime_enable_file(self):
+    carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
+    self.assertNotIn('"JeepFullLongLaunch"', carcontroller_source)
+    self.assertIn(
+      "self.jeep_full_long_launch_enabled = (\n"
+      "      JEEP_FULL_LONG_BRAKE_TO_ZERO_COMPILED\n"
+      "    )",
+      carcontroller_source,
+    )
 
   def test_legacy_brake_hold_transmit_path_is_removed(self):
     carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
