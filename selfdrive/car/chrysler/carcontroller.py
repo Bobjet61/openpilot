@@ -213,6 +213,7 @@ class CarController(CarControllerBase):
         f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )
+      self.log_wp_long_diagnostic(CS)
       self.log_jeep_long_plan_shadow(CS)
       self.log_jeep_radar_shadow(CS)
       self.log_jeep_steering_shadow()
@@ -544,6 +545,23 @@ class CarController(CarControllerBase):
       f"radar_v={result.radar_v_rel:.2f},"
       f"transport={self.jeep_long_envelope.transport_enabled},"
       f"host_enabled={self.jeep_long_envelope.host_enabled}"
+    )
+
+  @staticmethod
+  def log_wp_long_diagnostic(CS):
+    diagnostic = CS.wp_long_diagnostic
+    if diagnostic is None:
+      return
+    cloudlog.info(
+      f"Jeep WP long diagnostic: valid={diagnostic.valid},"
+      f"applied={diagnostic.applied},"
+      f"host_requested={diagnostic.host_requested},"
+      f"brake_requested={diagnostic.brake_requested},"
+      f"engine_requested={diagnostic.engine_requested},"
+      f"failure_mask=0x{diagnostic.failure_mask:04x},"
+      f"failure_reasons={'|'.join(diagnostic.failure_reasons) or 'none'},"
+      f"private_counter={diagnostic.private_counter},"
+      f"stock_counter={diagnostic.stock_counter}"
     )
 
   def log_jeep_radar_shadow(self, CS):

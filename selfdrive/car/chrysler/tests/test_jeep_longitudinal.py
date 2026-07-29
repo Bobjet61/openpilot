@@ -31,6 +31,7 @@ JEEP_LONG_SHADOW_TRANSPORT_COMPILED = LONG.JEEP_LONG_SHADOW_TRANSPORT_COMPILED
 JeepLongitudinalShadow = LONG.JeepLongitudinalShadow
 JeepLongitudinalTransportScheduler = LONG.JeepLongitudinalTransportScheduler
 TRANSPORT_MIN_SEND_INTERVAL_NS = LONG.TRANSPORT_MIN_SEND_INTERVAL_NS
+decode_wp_long_diagnostic = LONG.decode_wp_long_diagnostic
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
@@ -106,6 +107,38 @@ def load_chryslercan():
 
 
 class TestJeepLongitudinalShadow(unittest.TestCase):
+  def test_white_panda_diagnostic_decodes_applied_brake_cycle(self):
+    diagnostic = decode_wp_long_diagnostic(0xB7, 0, 0, 0xA4)
+    self.assertTrue(diagnostic.valid)
+    self.assertTrue(diagnostic.applied)
+    self.assertTrue(diagnostic.host_requested)
+    self.assertTrue(diagnostic.brake_requested)
+    self.assertFalse(diagnostic.engine_requested)
+    self.assertEqual(diagnostic.failure_mask, 0)
+    self.assertEqual(diagnostic.failure_reasons, ())
+    self.assertEqual(diagnostic.private_counter, 10)
+    self.assertEqual(diagnostic.stock_counter, 4)
+
+  def test_white_panda_diagnostic_names_multiple_failures(self):
+    failure_mask = (1 << 5) | (1 << 11) | (1 << 15)
+    diagnostic = decode_wp_long_diagnostic(
+      0xB2,
+      failure_mask & 0xFF,
+      failure_mask >> 8,
+      0x31,
+    )
+    self.assertTrue(diagnostic.valid)
+    self.assertFalse(diagnostic.applied)
+    self.assertEqual(
+      diagnostic.failure_reasons,
+      ("speed_not_fresh", "speed_too_low", "command_envelope"),
+    )
+
+  def test_legacy_zero_white_panda_beacon_is_unsupported(self):
+    diagnostic = decode_wp_long_diagnostic(0, 0, 0, 0)
+    self.assertFalse(diagnostic.valid)
+    self.assertEqual(diagnostic.failure_reasons, ("unsupported_beacon",))
+
   def test_transport_and_actuation_are_compiled_on_for_b8y(self):
     self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
     self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)

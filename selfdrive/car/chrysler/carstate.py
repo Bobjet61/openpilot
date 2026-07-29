@@ -8,7 +8,17 @@ from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import (
   RADAR_MSGS_C,
   RADAR_MSGS_D,
 )
-from openpilot.selfdrive.car.chrysler.values import CAR, DBC, STEER_THRESHOLD, RAM_CARS, BUTTON_STATES
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
+  decode_wp_long_diagnostic,
+)
+from openpilot.selfdrive.car.chrysler.values import (
+  BUTTON_STATES,
+  CAR,
+  DBC,
+  RAM_CARS,
+  STEER_THRESHOLD,
+  ChryslerFlagsSP,
+)
 
 
 class CarState(CarStateBase):
@@ -33,6 +43,7 @@ class CarState(CarStateBase):
     self.forward_gear = False
     self.acc_decelerating = False
     self.das_3 = {}
+    self.wp_long_diagnostic = None
 
     self.lkas_enabled = False
     self.prev_lkas_enabled = False
@@ -142,6 +153,14 @@ class CarState(CarStateBase):
     self.button_counter = cp.vl["CRUISE_BUTTONS"]["COUNTER"]
     self.cruise_buttons = cp.vl["CRUISE_BUTTONS"]
     self.das_3 = dict(cp_cruise.vl["DAS_3"])
+    if self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
+      wp_diag = cp.vl["WP_LONG_DIAGNOSTIC"]
+      self.wp_long_diagnostic = decode_wp_long_diagnostic(
+        int(wp_diag["STATUS"]),
+        int(wp_diag["FAILURE_LOW"]),
+        int(wp_diag["FAILURE_HIGH"]),
+        int(wp_diag["COUNTERS"]),
+      )
 
     return ret
 
@@ -186,6 +205,12 @@ class CarState(CarStateBase):
         ("TRACTION_BUTTON", 1),
       ]
       messages += CarState.get_cruise_messages()
+
+    if CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
+      # Frequency zero keeps this diagnostic-only beacon out of CAN-health
+      # decisions. Older White Panda firmware sends four zero bytes, which the
+      # decoder reports as unsupported without changing vehicle behavior.
+      messages.append(("WP_LONG_DIAGNOSTIC", 0))
 
     return CANParser(DBC[CP.carFingerprint]["pt"], messages, 0)
 

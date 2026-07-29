@@ -1,6 +1,28 @@
 from dataclasses import dataclass
 
 
+WP_LONG_DIAGNOSTIC_SIGNATURE = 0xB0
+WP_LONG_DIAGNOSTIC_SIGNATURE_MASK = 0xF0
+WP_LONG_DIAGNOSTIC_FAILURES = {
+  0: "actuation_disabled",
+  1: "host_not_requested",
+  2: "brake_not_fresh",
+  3: "dash_not_fresh",
+  4: "torque_not_fresh",
+  5: "speed_not_fresh",
+  6: "gas_not_fresh",
+  7: "brake_pedal_not_fresh",
+  8: "stock_acc_not_fresh",
+  9: "counters_misaligned",
+  10: "private_integrity",
+  11: "speed_too_low",
+  12: "driver_brake",
+  13: "driver_gas",
+  14: "collision",
+  15: "command_envelope",
+}
+
+
 # Independent host-to-Panda transport gate.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
 
@@ -80,6 +102,48 @@ class JeepLongitudinalEnvelope:
   transport_enabled: bool
   host_enabled: bool
   eligible: bool
+
+
+@dataclass(frozen=True)
+class JeepLongitudinalDiagnostic:
+  valid: bool
+  applied: bool
+  host_requested: bool
+  brake_requested: bool
+  engine_requested: bool
+  failure_mask: int
+  failure_reasons: tuple[str, ...]
+  private_counter: int
+  stock_counter: int
+
+
+def decode_wp_long_diagnostic(
+    status: int,
+    failure_low: int,
+    failure_high: int,
+    counters: int,
+) -> JeepLongitudinalDiagnostic:
+  status &= 0xFF
+  failure_mask = (failure_low & 0xFF) | ((failure_high & 0xFF) << 8)
+  valid = (
+    status & WP_LONG_DIAGNOSTIC_SIGNATURE_MASK
+  ) == WP_LONG_DIAGNOSTIC_SIGNATURE
+  failure_reasons = tuple(
+    reason
+    for bit, reason in WP_LONG_DIAGNOSTIC_FAILURES.items()
+    if failure_mask & (1 << bit)
+  ) if valid else ("unsupported_beacon",)
+  return JeepLongitudinalDiagnostic(
+    valid=valid,
+    applied=valid and bool(status & (1 << 0)),
+    host_requested=valid and bool(status & (1 << 1)),
+    brake_requested=valid and bool(status & (1 << 2)),
+    engine_requested=valid and bool(status & (1 << 3)),
+    failure_mask=failure_mask if valid else 0,
+    failure_reasons=failure_reasons,
+    private_counter=(counters >> 4) & 0xF,
+    stock_counter=counters & 0xF,
+  )
 
 
 def clip(value: float, lower: float, upper: float) -> float:
