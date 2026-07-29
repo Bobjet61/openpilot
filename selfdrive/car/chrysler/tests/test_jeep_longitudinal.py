@@ -71,6 +71,11 @@ class PrivateMessagePacker:
     return self.ADDRESSES[name], bus, bytes(dat), 0
 
 
+class RecordingPacker:
+  def make_can_msg(self, name, bus, values):
+    return name, bus, values.copy()
+
+
 def load_chryslercan():
   cereal = ModuleType("cereal")
   cereal.car = SimpleNamespace(
@@ -163,36 +168,31 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     ):
       self.assertNotIn(forbidden, planner_source)
 
-  def test_legacy_brake_hold_transmit_path_is_removed(self):
+  def test_b6y_hold_is_direct_brake_only_and_gated(self):
     carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
     carstate_source = CARSTATE_PATH.read_text(encoding="utf-8")
     chryslercan_source = CHRYSLERCAN_PATH.read_text(encoding="utf-8")
     controlsd_source = CONTROLSD_PATH.read_text(encoding="utf-8")
 
-    for forbidden in (
-      "def brake_hold(",
-      "self.brake_hold(",
-      "bh_hold_decel",
-      "bh_last_resume_frame",
-      "last_das_3_counter",
-      "Brake hold:",
-      "BRAKE_HOLD_CARS",
-      "chryslercan.das_3_command(",
-    ):
-      self.assertNotIn(forbidden, carcontroller_source)
+    self.assertIn("def update_b6y_standstill_hold(", carcontroller_source)
+    self.assertIn("CC.enabled and CC.longActive", carcontroller_source)
+    self.assertIn("CS.cruise_active_actual and CS.acc_decelerating", carcontroller_source)
+    self.assertIn("not CS.forward_gear or not CS.out.standstill", carcontroller_source)
+    self.assertIn("CS.out.accFaulted or CS.out.stockAeb", carcontroller_source)
+    self.assertIn("chryslercan.create_b6y_standstill_hold(", carcontroller_source)
+    self.assertIn("if not CS.b6y_hold_active or CS.cruise_active_actual:", carcontroller_source)
+    self.assertIn("if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:", carcontroller_source)
+    self.assertIn("def create_b6y_standstill_hold(", chryslercan_source)
+    self.assertIn('"ENGINE_TORQUE_REQUEST_MAX": 0', chryslercan_source)
+    self.assertIn('"ACC_DECEL": -2.0', chryslercan_source)
+    self.assertIn('"ACC_GO": 0', chryslercan_source)
 
-    self.assertNotIn("def das_3_command(", chryslercan_source)
-    for forbidden in (
-      "self.brake_hold",
-      "self.cruise_active_actual",
-      "self.forward_gear",
-      "self.acc_decelerating",
-      "self.das_3",
-      "ret.brakeHoldActive",
-    ):
-      self.assertNotIn(forbidden, carstate_source)
-
-    self.assertNotIn("BRAKE_HOLD_DIAG", controlsd_source)
+    self.assertIn("self.b6y_hold_active = False", carstate_source)
+    self.assertIn("self.cruise_active_actual = ret.cruiseState.enabled", carstate_source)
+    self.assertIn("self.das_3 = dict(cp_cruise.vl[\"DAS_3\"])", carstate_source)
+    # The custom bridge is not exposed as the generic brake-hold state:
+    # that generic event intentionally disengages openpilot longitudinal.
+    self.assertNotIn("ret.brakeHoldActive", carstate_source)
     self.assertNotIn("CS.brakeHoldActive", controlsd_source)
     self.assertIn(
       "cruise_mismatch = CS.cruiseState.enabled and not self.enabled",
@@ -203,6 +203,37 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "self.CP, resume=True))",
       carcontroller_source,
     )
+
+  def test_b6y_hold_message_has_no_propulsion_or_go_request(self):
+    chryslercan = load_chryslercan()
+    stock = {
+      "ENGINE_TORQUE_REQUEST": 12.5,
+      "ENGINE_TORQUE_REQUEST_MAX": 1,
+      "ACC_STANDSTILL": 1,
+      "ACC_GO": 1,
+      "ACC_DECEL": 4.0,
+      "ACC_AVAILABLE": 1,
+      "ACC_ACTIVE": 0,
+      "GR_MAX_REQ": 8,
+      "ACC_DECEL_REQ": 0,
+      "ACC_BRK_PREP": 1,
+      "COUNTER": 15,
+    }
+    name, bus, values = chryslercan.create_b6y_standstill_hold(
+      RecordingPacker(), 2, stock,
+    )
+    self.assertEqual((name, bus), ("DAS_3", 0))
+    self.assertEqual(values["COUNTER"], 1)
+    self.assertEqual(values["ACC_DECEL"], -2.0)
+    self.assertEqual(values["ACC_DECEL_REQ"], 1)
+    self.assertEqual(values["ACC_AVAILABLE"], 1)
+    self.assertEqual(values["ACC_ACTIVE"], 1)
+    self.assertEqual(values["GR_MAX_REQ"], 2)
+    self.assertEqual(values["ENGINE_TORQUE_REQUEST_MAX"], 0)
+    self.assertEqual(values["ACC_GO"], 0)
+    self.assertEqual(values["ACC_STANDSTILL"], 0)
+    self.assertEqual(values["ACC_BRK_PREP"], 0)
+    self.assertEqual(values["ENGINE_TORQUE_REQUEST"], 12.5)
 
   def test_transport_and_actuation_are_independent_fail_closed_gates(self):
     with (

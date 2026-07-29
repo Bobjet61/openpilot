@@ -29,6 +29,8 @@ JEEP_LONG_CARS = {
   CAR.JEEP_GRAND_CHEROKEE_2019,
 }
 
+B6Y_STANDSTILL_HOLD_DECEL = -2.0
+
 
 class CarController(CarControllerBase):
   def __init__(self, dbc_name, CP, VM):
@@ -40,6 +42,8 @@ class CarController(CarControllerBase):
     self.last_lkas_falling_edge = 0
     self.lkas_control_bit_prev = False
     self.last_button_frame = 0
+    self.b6y_last_das_3_counter = -1
+    self.b6y_last_resume_frame = -100
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
@@ -338,6 +342,10 @@ class CarController(CarControllerBase):
 
       can_sends.append(chryslercan.create_lkas_command(self.packer, self.CP, int(apply_steer), lkas_control_bit))
 
+    if (self.CP.carFingerprint in JEEP_LONG_CARS and
+        self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20):
+      self.update_b6y_standstill_hold(CC, CS, can_sends)
+
     self.frame += 1
 
     new_actuators = CC.actuators.as_builder()
@@ -345,6 +353,61 @@ class CarController(CarControllerBase):
     new_actuators.steerOutputCan = self.apply_steer_last
 
     return new_actuators, can_sends
+
+  def update_b6y_standstill_hold(self, CC, CS, can_sends):
+    """Bridge the stock ACC standstill timeout with the proven b6 brake hold."""
+    if not self.CP.openpilotLongitudinalControl or not CS.das_3:
+      return
+
+    counter = CS.das_3.get("COUNTER")
+    counter_changed = counter != self.b6y_last_das_3_counter
+    self.b6y_last_das_3_counter = counter
+
+    if (not CS.b6y_hold_active and CC.enabled and CC.longActive and
+        CS.cruise_active_actual and CS.acc_decelerating and
+        CS.out.standstill and not CS.out.accFaulted and
+        not CS.out.stockAeb):
+      CS.b6y_hold_active = True
+      self.b6y_last_resume_frame = self.frame - 10
+      cloudlog.info(
+        "B6Y hold: armed after stock ACC decelerated to standstill"
+      )
+
+    if (CS.b6y_hold_active and
+        (not CC.enabled or CC.cruiseControl.cancel or
+         CS.out.gasPressed or CS.out.brakePressed or
+         not CS.forward_gear or not CS.out.standstill or
+         CS.out.accFaulted or CS.out.stockAeb)):
+      CS.b6y_hold_active = False
+      cloudlog.info("B6Y hold: released")
+      return
+
+    if not CS.b6y_hold_active or CS.cruise_active_actual:
+      return
+
+    counter_offset = 2 if counter_changed else 3
+    can_sends.append(chryslercan.create_b6y_standstill_hold(
+      self.packer,
+      counter_offset,
+      CS.das_3,
+    ))
+
+    # This asks stock ACC to re-enter control; it is not a propulsion command.
+    # b8y's private engine-torque path remains blocked until the Jeep is moving.
+    if self.frame - self.b6y_last_resume_frame >= 10:
+      can_sends.append(chryslercan.create_cruise_buttons(
+        self.packer,
+        CS.button_counter + 1,
+        0,
+        self.CP,
+        resume=True,
+      ))
+      self.b6y_last_resume_frame = self.frame
+
+    if self.frame % 50 == 0:
+      cloudlog.info(
+        f"B6Y hold: direct brake={B6Y_STANDSTILL_HOLD_DECEL:.1f}, counter_offset={counter_offset}"
+      )
 
   def jeep_long_vehicle_eligibility(self, CC, CS):
     if self.CP.carFingerprint not in JEEP_LONG_CARS:

@@ -152,6 +152,24 @@ def create_wp_long_transport_messages(packer, counter):
   ]
 
 
+def create_b6y_standstill_hold(packer, counter_offset, das_3):
+  """Copy fresh stock DAS_3 and change only the proven b6 hold fields."""
+  values = das_3.copy()
+  values.update({
+    "ENGINE_TORQUE_REQUEST_MAX": 0,
+    "ACC_STANDSTILL": 0,
+    "ACC_GO": 0,
+    "ACC_DECEL": -2.0,
+    "ACC_AVAILABLE": 1,
+    "ACC_ACTIVE": 1,
+    "GR_MAX_REQ": 2,
+    "ACC_DECEL_REQ": 1,
+    "ACC_BRK_PREP": 0,
+    "COUNTER": (das_3["COUNTER"] + counter_offset) % 0x10,
+  })
+  return packer.make_can_msg("DAS_3", 0, values)
+
+
 def create_lkas_heartbit(packer, lkas_disabled, lkas_heartbit):
   # LKAS_HEARTBIT (697) LKAS heartbeat
   values = lkas_heartbit.copy()  # forward what we parsed

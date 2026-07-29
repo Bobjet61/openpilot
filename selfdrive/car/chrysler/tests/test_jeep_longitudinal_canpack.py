@@ -125,6 +125,37 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
           for msg in (brake, dash, torque)),
     )
 
+  def test_b6y_hold_packs_only_exact_brake_authority(self):
+    stock = {
+      "ENGINE_TORQUE_REQUEST": 12.5,
+      "ENGINE_TORQUE_REQUEST_MAX": 1,
+      "ACC_STANDSTILL": 1,
+      "ACC_GO": 1,
+      "ACC_DECEL": 4.0,
+      "ACC_AVAILABLE": 1,
+      "ACC_ACTIVE": 0,
+      "GR_MAX_REQ": 8,
+      "ACC_DECEL_REQ": 0,
+      "ACC_BRK_PREP": 1,
+      "COUNTER": 15,
+    }
+    addr, bus, dat, _ = chryslercan.create_b6y_standstill_hold(
+      self.packer, 2, stock,
+    )
+
+    decel_raw = ((dat[2] & 0xF) << 8) | dat[3]
+    engine_torque_raw = ((dat[0] & 0x1F) << 8) | dat[1]
+    self.assertEqual((addr, bus, len(dat)), (0x1F4, 0, 8))
+    self.assertEqual(decel_raw, 2866)
+    self.assertEqual((dat[2] >> 4) & 0x3, 0x3)
+    self.assertEqual((dat[4] >> 4) & 0x7, 1)
+    self.assertEqual(dat[4] & 0xF, 2)
+    self.assertEqual(dat[6] >> 4, 1)
+    self.assertEqual(dat[6] & 0x2, 0)
+    self.assertEqual(dat[0] & 0xE0, 0)
+    self.assertEqual(engine_torque_raw, 2050)
+    self.assertEqual(dat[7], fca_checksum(dat))
+
 
 if __name__ == "__main__":
   unittest.main()
