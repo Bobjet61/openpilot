@@ -157,6 +157,10 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED",
       interface_source,
     )
+    self.assertIn(
+      "ret.pcmCruise = not JEEP_LONG_ACTUATION_COMPILED",
+      interface_source,
+    )
 
     planner_source = PLANNER_PATH.read_text(encoding="utf-8")
     self.assertIn(

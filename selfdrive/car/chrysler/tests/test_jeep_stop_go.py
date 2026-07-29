@@ -214,7 +214,6 @@ class TestJeepFullLongLaunchGuard(unittest.TestCase):
       "plan_valid": True,
       "plan_has_lead": True,
       "lead_departure_confirmed": True,
-      "resume_pressed": False,
       "cancel": False,
       "gas_pressed": False,
       "brake_pressed": False,
@@ -228,23 +227,38 @@ class TestJeepFullLongLaunchGuard(unittest.TestCase):
     return self.guard.update(**values)
 
   def arm(self):
-    return self.update(resume_pressed=True)
+    first = self.update(frame=100)
+    self.assertTrue(first.send_resume)
+    self.assertFalse(first.armed)
+    second = self.update(frame=110)
+    self.assertTrue(second.send_resume)
+    self.assertFalse(second.armed)
+    third = self.update(frame=120)
+    self.assertTrue(third.send_resume)
+    self.assertFalse(third.armed)
+    return self.update(frame=135)
 
-  def test_defaults_to_unarmed_and_requires_resume_rising_edge(self):
-    self.assertFalse(self.update().armed)
-    self.assertTrue(self.arm().armed)
-    self.assertTrue(self.update(frame=101, resume_pressed=True).armed)
+  def test_confirmed_lead_departure_runs_settled_resume_handshake(self):
+    first = self.update()
+    self.assertFalse(first.armed)
+    self.assertTrue(first.send_resume)
+    self.assertEqual(first.resume_attempts, 1)
+    self.assertFalse(self.update(frame=109).send_resume)
+    self.assertTrue(self.update(frame=110).send_resume)
+    self.assertTrue(self.update(frame=120).send_resume)
+    self.assertFalse(self.update(frame=134).armed)
+    armed = self.update(frame=135)
+    self.assertTrue(armed.armed)
+    self.assertEqual(armed.reason, "auto_lead_departure_armed")
 
     self.guard = STOP_GO.JeepFullLongLaunchGuard()
-    self.assertFalse(self.update(
-      resume_pressed=True,
-      lead_departure_confirmed=False,
-    ).armed)
-    self.assertFalse(self.update(
-      frame=101,
-      resume_pressed=True,
-      lead_departure_confirmed=True,
-    ).armed)
+    waiting = self.update(lead_departure_confirmed=False)
+    self.assertFalse(waiting.armed)
+    self.assertFalse(waiting.send_resume)
+    self.assertEqual(waiting.reason, "awaiting_lead_departure")
+
+  def test_arm_helper(self):
+    self.assertTrue(self.arm().armed)
 
   def test_arm_requires_stopped_valid_positive_lead_plan(self):
     for change in (
@@ -256,17 +270,27 @@ class TestJeepFullLongLaunchGuard(unittest.TestCase):
       {"lead_departure_confirmed": False},
     ):
       self.guard = STOP_GO.JeepFullLongLaunchGuard()
-      self.assertFalse(self.update(resume_pressed=True, **change).armed, change)
+      result = self.update(**change)
+      self.assertFalse(result.armed, change)
+      self.assertFalse(result.send_resume, change)
+
+  def test_nonpositive_plan_aborts_pending_handshake(self):
+    first = self.update(frame=100)
+    self.assertTrue(first.send_resume)
+    aborted = self.update(frame=101, requested_accel_mps2=0.0)
+    self.assertFalse(aborted.armed)
+    self.assertFalse(aborted.send_resume)
+    self.assertEqual(aborted.reason, "launch_plan_not_positive")
 
   def test_launch_is_one_shot_and_times_out(self):
     self.assertTrue(self.arm().armed)
     self.assertTrue(self.update(
-      frame=100 + STOP_GO.FULL_LONG_LAUNCH_WINDOW_FRAMES - 1,
+      frame=135 + STOP_GO.FULL_LONG_LAUNCH_WINDOW_FRAMES - 1,
       standstill=False,
       v_ego_mps=1.0,
     ).armed)
     timed_out = self.update(
-      frame=100 + STOP_GO.FULL_LONG_LAUNCH_WINDOW_FRAMES,
+      frame=135 + STOP_GO.FULL_LONG_LAUNCH_WINDOW_FRAMES,
       standstill=False,
       v_ego_mps=1.0,
     )
@@ -301,7 +325,7 @@ class TestJeepFullLongLaunchGuard(unittest.TestCase):
     ):
       self.guard = STOP_GO.JeepFullLongLaunchGuard()
       self.assertTrue(self.arm().armed)
-      self.assertFalse(self.update(frame=101, **change).armed, change)
+      self.assertFalse(self.update(frame=136, **change).armed, change)
 
 
 if __name__ == "__main__":

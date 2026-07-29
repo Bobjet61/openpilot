@@ -17,6 +17,10 @@ MOVE_RELEASE_SPEED_MPS = 0.5
 FULL_LONG_LAUNCH_WINDOW_FRAMES = 800  # 8 seconds at 100 Hz
 FULL_LONG_LAUNCH_COMPLETE_MPS = 2.05
 FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS = 0.2
+AUTO_LAUNCH_RESUME_INTERVAL_FRAMES = 10  # 0.1 seconds
+AUTO_LAUNCH_RESUME_ATTEMPTS = 3
+AUTO_LAUNCH_SETTLE_FRAMES = 35  # hold for 0.35 seconds before propulsion
+AUTO_LAUNCH_HANDSHAKE_TIMEOUT_FRAMES = 100
 
 
 @dataclass(frozen=True)
@@ -159,29 +163,40 @@ class JeepStopGoHold:
 @dataclass(frozen=True)
 class JeepFullLongLaunchResult:
   armed: bool
+  send_resume: bool
   reason: str
   arm_frame: int
+  resume_attempts: int
 
 
 class JeepFullLongLaunchGuard:
-  """One-shot manual launch authorization for b9f low-speed propulsion."""
+  """One-shot, lead-departure launch authorization for low-speed propulsion."""
 
   def __init__(self):
     self.armed = False
     self.arm_frame = -1
-    self.resume_pressed_prev = False
+    self.handshake_pending = False
+    self.handshake_frame = -1
+    self.last_resume_frame = -AUTO_LAUNCH_RESUME_INTERVAL_FRAMES
+    self.resume_attempts = 0
     self.reason = "mode_disabled"
 
-  def _result(self) -> JeepFullLongLaunchResult:
+  def _result(self, send_resume: bool = False) -> JeepFullLongLaunchResult:
     return JeepFullLongLaunchResult(
       armed=self.armed,
+      send_resume=send_resume,
       reason=self.reason,
       arm_frame=self.arm_frame,
+      resume_attempts=self.resume_attempts,
     )
 
   def _disarm(self, reason: str) -> JeepFullLongLaunchResult:
     self.armed = False
     self.arm_frame = -1
+    self.handshake_pending = False
+    self.handshake_frame = -1
+    self.last_resume_frame = -AUTO_LAUNCH_RESUME_INTERVAL_FRAMES
+    self.resume_attempts = 0
     self.reason = reason
     return self._result()
 
@@ -201,16 +216,12 @@ class JeepFullLongLaunchGuard:
       plan_valid: bool,
       plan_has_lead: bool,
       lead_departure_confirmed: bool,
-      resume_pressed: bool,
       cancel: bool,
       gas_pressed: bool,
       brake_pressed: bool,
       acc_faulted: bool,
       stock_aeb: bool,
   ) -> JeepFullLongLaunchResult:
-    resume_rising = resume_pressed and not self.resume_pressed_prev
-    self.resume_pressed_prev = resume_pressed
-
     if not mode_enabled:
       return self._disarm("mode_disabled")
     if not supported:
@@ -235,29 +246,76 @@ class JeepFullLongLaunchGuard:
       return self._disarm("stock_aeb")
     if not plan_valid:
       return self._disarm("plan_invalid")
-    if self.armed and not plan_has_lead:
+    if (self.armed or self.handshake_pending) and not plan_has_lead:
       return self._disarm("lead_lost")
     if self.armed and v_ego_mps >= FULL_LONG_LAUNCH_COMPLETE_MPS:
       return self._disarm("launch_complete")
+    if (
+        (self.armed or self.handshake_pending)
+        and standstill
+        and requested_accel_mps2 <= 0.05
+    ):
+      return self._disarm("launch_plan_not_positive")
     if (
         self.armed
         and frame - self.arm_frame >= FULL_LONG_LAUNCH_WINDOW_FRAMES
     ):
       return self._disarm("launch_timeout")
 
-    can_arm = (
-      resume_rising
+    can_begin_handshake = (
+      not self.armed
+      and not self.handshake_pending
       and standstill
       and v_ego_mps <= FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS
       and plan_has_lead
       and lead_departure_confirmed
       and requested_accel_mps2 > 0.05
     )
-    if can_arm:
-      self.armed = True
-      self.arm_frame = frame
-      self.reason = "physical_resume_armed"
-    elif not self.armed:
-      self.reason = "awaiting_physical_resume"
+    if can_begin_handshake:
+      self.handshake_pending = True
+      self.handshake_frame = frame
+      self.last_resume_frame = frame
+      self.resume_attempts = 1
+      self.reason = "auto_resume_handshake"
+      return self._result(send_resume=True)
+
+    if self.handshake_pending:
+      if not standstill or v_ego_mps > FULL_LONG_LAUNCH_ARM_MAX_SPEED_MPS:
+        return self._disarm("moved_before_launch_arm")
+      elapsed_frames = frame - self.handshake_frame
+      send_resume = (
+        self.resume_attempts < AUTO_LAUNCH_RESUME_ATTEMPTS
+        and frame - self.last_resume_frame
+        >= AUTO_LAUNCH_RESUME_INTERVAL_FRAMES
+      )
+      if send_resume:
+        self.last_resume_frame = frame
+        self.resume_attempts += 1
+      if (
+          self.resume_attempts >= AUTO_LAUNCH_RESUME_ATTEMPTS
+          and elapsed_frames >= AUTO_LAUNCH_SETTLE_FRAMES
+          and requested_accel_mps2 > 0.05
+      ):
+        self.handshake_pending = False
+        self.handshake_frame = -1
+        self.last_resume_frame = -AUTO_LAUNCH_RESUME_INTERVAL_FRAMES
+        self.resume_attempts = 0
+        self.armed = True
+        self.arm_frame = frame
+        self.reason = "auto_lead_departure_armed"
+        return self._result()
+      if elapsed_frames >= AUTO_LAUNCH_HANDSHAKE_TIMEOUT_FRAMES:
+        return self._disarm("auto_resume_handshake_timeout")
+      self.reason = (
+        "auto_resume_settling"
+        if self.resume_attempts >= AUTO_LAUNCH_RESUME_ATTEMPTS
+        else "auto_resume_handshake"
+      )
+      return self._result(send_resume=send_resume)
+
+    if self.armed:
+      self.reason = "auto_lead_departure_armed"
+    else:
+      self.reason = "awaiting_lead_departure"
 
     return self._result()

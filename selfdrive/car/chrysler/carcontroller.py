@@ -257,7 +257,6 @@ class CarController(CarControllerBase):
         self.jeep_lead_departure_cycles
         >= LEAD_DEPARTURE_CONFIRM_CYCLES
       ),
-      resume_pressed=CS.buttonStates["resumeCruise"],
       cancel=CC.cruiseControl.cancel,
       gas_pressed=CS.out.gasPressed,
       brake_pressed=CS.out.brakePressed,
@@ -395,6 +394,20 @@ class CarController(CarControllerBase):
             can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter, das_bus, self.CP, buttons=self.cruise_button))
           elif button_counter_offset is not None:
             can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + button_counter_offset, das_bus, self.CP, buttons=self.cruise_button))
+
+    if (
+        self.jeep_full_long_launch_result is not None
+        and self.jeep_full_long_launch_result.send_resume
+        and not resume_sent
+    ):
+      can_sends.append(chryslercan.create_cruise_buttons(
+        self.packer,
+        CS.button_counter + 1,
+        0,
+        self.CP,
+        resume=True,
+      ))
+      resume_sent = True
 
     if (
         self.jeep_stop_go_result is not None
@@ -803,6 +816,8 @@ class CarController(CarControllerBase):
       f"full_long_launch_armed={launch.armed},"
       f"full_long_launch_reason={launch.reason},"
       f"full_long_launch_arm_frame={launch.arm_frame},"
+      f"full_long_auto_resume={launch.send_resume},"
+      f"full_long_auto_resume_attempts={launch.resume_attempts},"
       f"lead_departure_cycles={self.jeep_lead_departure_cycles},"
       f"stock_acc_state_raw={CS.stock_acc_state_raw},"
       f"steer_max_applied={self.params.STEER_MAX},"

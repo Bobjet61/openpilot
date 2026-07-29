@@ -79,6 +79,10 @@ class CarInterface(CarInterfaceBase):
       # dual-Panda safety gates all agree.
       ret.experimentalLongitudinalAvailable = JEEP_LONG_ACTUATION_COMPILED
       ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED
+      # Keep SunnyPilot's own ACC engagement latched when factory ACC changes
+      # from active state 4 to standby state 3 at a stop. Pedal, cancel, gear,
+      # ACC-main, and fault handling remain independent disengagement paths.
+      ret.pcmCruise = not JEEP_LONG_ACTUATION_COMPILED
 
       ret.lateralTuning.init('pid')
       # Preserve the existing tune through 20 m/s, then mildly soften the
