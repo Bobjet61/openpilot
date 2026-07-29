@@ -633,7 +633,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       (False, False, False),
     )
 
-  def test_standstill_launch_requires_physical_resume_and_launch_bit(self):
+  def test_standstill_launch_requires_resume_handshake_and_launch_bit(self):
     self._reset_long_shadow(actuation=True)
     self._enable_standstill_launch_source()
     self.assertEqual(
@@ -653,6 +653,28 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
         enable=True, launch=True,
       ),
       (True, True, True),
+    )
+
+  def test_host_generated_resume_authorizes_standby_launch(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source()
+    self.assertTrue(self._tx(self._resume_button_msg()))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 20_000, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (True, True, True),
+    )
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_standstill_hold_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 20_000, torque_raw=2160, engine_request=True,
+        enable=True, launch=True,
+      ),
+      (False, False, False),
     )
 
   def test_standstill_launch_torque_cap_and_timeouts(self):

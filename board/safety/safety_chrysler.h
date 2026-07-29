@@ -353,9 +353,10 @@ static uint8_t chrysler_long_source_reject_reason(
   // A standstill exception can authorize only a complete brake cycle. It
   // retains ACC-main, pedal, collision, freshness, integrity, and payload
   // checks, and never authorizes engine torque.
-  if (!controls_allowed && !standstill_brake) {
+  if (!controls_allowed && !standstill_brake && !launch_authorized) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS;
-  } else if (!controls_allowed_long && !standstill_brake) {
+  } else if (!controls_allowed_long && !standstill_brake &&
+             !launch_authorized) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
   } else if (!acc_main_on) {
     reason = CHRYSLER_LONG_REJECT_ACC_MAIN;
@@ -837,6 +838,13 @@ static bool chrysler_tx_hook(const CANPacket_t *to_send) {
                           controls_allowed && controls_allowed_long);
     if (!allowed) {
       tx = false;
+    } else if (allow_resume_standstill &&
+               chrysler_long_actuation_enabled) {
+      // A host-generated RESUME is the automatic launch handshake. The
+      // external White Panda consumes the same frame while holding the
+      // vehicle, and independently requires it before accepting propulsion.
+      chrysler_long_resume_seen = true;
+      chrysler_long_resume_ts = microsecond_timer_get();
     }
   }
 
