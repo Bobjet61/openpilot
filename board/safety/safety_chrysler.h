@@ -59,6 +59,8 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US 15000U
 #define CHRYSLER_LONG_COUNTER_RESET_US 100000U
+#define CHRYSLER_B6Y_HOLD_DECEL_RAW 2866
+#define CHRYSLER_B6Y_HOLD_TIMEOUT_US 100000U
 
 typedef struct {
   const int EPS_2;
@@ -212,6 +214,8 @@ static uint8_t chrysler_long_last_counter = 0U;
 static bool chrysler_long_counter_seen = false;
 static bool chrysler_long_brake_active = false;
 static uint32_t chrysler_long_last_cycle_ts = 0U;
+static bool chrysler_b6y_hold_active = false;
+static uint32_t chrysler_b6y_hold_last_ts = 0U;
 
 typedef enum {
   CHRYSLER_LONG_REJECT_NONE = 0U,
@@ -303,6 +307,36 @@ static bool chrysler_long_fresh(const uint32_t now, const uint32_t last,
                                 const bool seen) {
   return seen &&
          (get_ts_elapsed(now, last) <= CHRYSLER_LONG_SOURCE_TIMEOUT_US);
+}
+
+static void chrysler_b6y_hold_clear(void) {
+  chrysler_b6y_hold_active = false;
+}
+
+static bool chrysler_b6y_hold_sources_valid(void) {
+  const uint32_t now = microsecond_timer_get();
+  return chrysler_long_actuation_enabled &&
+         (chrysler_platform == CHRYSLER_PACIFICA) &&
+         chrysler_das_3_last_valid &&
+         acc_main_on && !vehicle_moving &&
+         !gas_pressed && !brake_pressed &&
+         !chrysler_long_stock_collision &&
+         chrysler_long_fresh(now, chrysler_long_speed_ts,
+                             chrysler_long_speed_seen) &&
+         chrysler_long_fresh(now, chrysler_long_gas_ts,
+                             chrysler_long_gas_seen) &&
+         chrysler_long_fresh(now, chrysler_long_brake_ts,
+                             chrysler_long_brake_seen) &&
+         chrysler_long_fresh(now, chrysler_long_stock_ts,
+                             chrysler_long_stock_seen);
+}
+
+static bool chrysler_b6y_hold_recent(void) {
+  const uint32_t now = microsecond_timer_get();
+  return chrysler_b6y_hold_active &&
+         chrysler_b6y_hold_sources_valid() &&
+         (get_ts_elapsed(now, chrysler_b6y_hold_last_ts) <=
+          CHRYSLER_B6Y_HOLD_TIMEOUT_US);
 }
 
 static uint8_t chrysler_long_source_reject_reason(uint32_t *detail) {
@@ -600,6 +634,10 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
       (((GET_BYTE(to_push, 4) >> 4) & 0x7U) > 1U);
     chrysler_long_stock_ts = microsecond_timer_get();
     chrysler_long_stock_seen = true;
+    if (cruise_engaged || !acc_main_on ||
+        chrysler_long_stock_collision) {
+      chrysler_b6y_hold_clear();
+    }
   }
 
   // TODO: use the same message for both
@@ -613,6 +651,9 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     vehicle_moving = (speed_l != 0) || (speed_r != 0);
     chrysler_long_speed_ts = microsecond_timer_get();
     chrysler_long_speed_seen = true;
+    if (vehicle_moving) {
+      chrysler_b6y_hold_clear();
+    }
   }
 
   // exit controls on rising edge of gas press
@@ -620,6 +661,9 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     gas_pressed = GET_BYTE(to_push, 0U) != 0U;
     chrysler_long_gas_ts = microsecond_timer_get();
     chrysler_long_gas_seen = true;
+    if (gas_pressed) {
+      chrysler_b6y_hold_clear();
+    }
   }
 
   // exit controls on rising edge of brake press
@@ -627,14 +671,17 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     brake_pressed = ((GET_BYTE(to_push, 0U) & 0xFU) >> 2U) == 1U;
     chrysler_long_brake_ts = microsecond_timer_get();
     chrysler_long_brake_seen = true;
+    if (brake_pressed) {
+      chrysler_b6y_hold_clear();
+    }
   }
 
   generic_rx_checks((bus == 0) && (addr == chrysler_addrs->LKAS_COMMAND));
 }
 
 static bool chrysler_das_3_tx_allowed(const CANPacket_t *to_send) {
-  if ((chrysler_platform != CHRYSLER_PACIFICA) || !chrysler_das_3_last_valid ||
-      !acc_main_on || vehicle_moving || gas_pressed || brake_pressed) {
+  if (!chrysler_b6y_hold_sources_valid()) {
+    chrysler_b6y_hold_clear();
     return false;
   }
 
@@ -650,14 +697,23 @@ static bool chrysler_das_3_tx_allowed(const CANPacket_t *to_send) {
   const int last_counter = chrysler_das_3_last[6] >> 4;
   const int counter_delta = (counter - last_counter) & 0xFU;
 
-  return ((GET_BYTE(to_send, 0) & 0x60U) == 0U) &&
-         ((GET_BYTE(to_send, 2) & 0x30U) == 0x30U) &&
-         ((GET_BYTE(to_send, 4) & 0xFU) == 2U) &&
-         (((GET_BYTE(to_send, 4) >> 4) & 0x7U) == 1U) &&
-         ((GET_BYTE(to_send, 6) & 0x2U) == 0U) &&
-         (decel_raw >= 2456) && (decel_raw <= 3275) &&
-         ((counter_delta == 2) || (counter_delta == 3)) &&
-         (GET_BYTE(to_send, 7) == chrysler_compute_checksum(to_send));
+  const bool allowed =
+    ((GET_BYTE(to_send, 0) & 0x60U) == 0U) &&
+    ((GET_BYTE(to_send, 2) & 0x30U) == 0x30U) &&
+    ((GET_BYTE(to_send, 4) & 0xFU) == 2U) &&
+    (((GET_BYTE(to_send, 4) >> 4) & 0x7U) == 1U) &&
+    ((GET_BYTE(to_send, 6) & 0x2U) == 0U) &&
+    (decel_raw == CHRYSLER_B6Y_HOLD_DECEL_RAW) &&
+    ((counter_delta == 2) || (counter_delta == 3)) &&
+    (GET_BYTE(to_send, 7) == chrysler_compute_checksum(to_send));
+
+  if (allowed) {
+    chrysler_b6y_hold_active = true;
+    chrysler_b6y_hold_last_ts = microsecond_timer_get();
+  } else {
+    chrysler_b6y_hold_clear();
+  }
+  return allowed;
 }
 
 static bool chrysler_tx_hook(const CANPacket_t *to_send) {
@@ -703,12 +759,16 @@ static bool chrysler_tx_hook(const CANPacket_t *to_send) {
     const bool is_resume = GET_BYTE(to_send, 0) == 0x10U;
     const bool is_accel = GET_BIT(to_send, 2);
     const bool is_decel = GET_BIT(to_send, 3);
-    // Permit RESUME after the stock stop-and-go timeout only while stopped
-    // and while ACC main remains on. ACCEL and DECEL retain normal authorization.
-    const bool allow_resume_standstill = is_resume && acc_main_on && !vehicle_moving;
+    // The controls_allowed bypass is valid only immediately after an accepted
+    // exact b6 hold frame. It cannot authorize standstill propulsion.
+    const bool allow_resume_standstill =
+      is_resume && chrysler_b6y_hold_recent();
     const bool allowed = is_cancel || allow_resume_standstill ||
                          ((is_resume || is_accel || is_decel) &&
                           controls_allowed && controls_allowed_long);
+    if (is_cancel) {
+      chrysler_b6y_hold_clear();
+    }
     if (!allowed) {
       tx = false;
     }
@@ -753,6 +813,8 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_long_last_counter = 0U;
   chrysler_long_cycle_counter = 0U;
   chrysler_long_last_cycle_ts = 0U;
+  chrysler_b6y_hold_last_ts = 0U;
+  chrysler_b6y_hold_clear();
   chrysler_long_reset_pending();
 
   bool enable_ram_dt = GET_FLAG(param, CHRYSLER_PARAM_RAM_DT);

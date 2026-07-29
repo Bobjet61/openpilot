@@ -89,7 +89,7 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
     self.assertTrue(self._rx(self._das_3_msg(counter=1, ACC_AVAILABLE=1)))
     self._rx(self._speed_msg(0))
     self.assertFalse(self.safety.get_longitudinal_allowed())
-    self.assertTrue(self._tx(self._button_msg(resume=True)))
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
 
     self._rx(self._speed_msg(1))
     self.assertFalse(self._tx(self._button_msg(resume=True)))
@@ -105,28 +105,140 @@ class TestChryslerSafety(common.PandaCarSafetyTest, common.MotorTorqueSteeringSa
     hold = {"ACC_AVAILABLE": 1, "ACC_ACTIVE": 1, "ACC_DECEL_REQ": 1,
             "ACC_DECEL": -2.0, "GR_MAX_REQ": 2}
 
-    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
     self.assertTrue(self._rx(self._das_3_msg(counter=1, ACC_AVAILABLE=1)))
-    self.assertTrue(self._tx(self._das_3_msg(counter=3, **hold)))
-
-    self.assertFalse(self._tx(self._das_3_msg(counter=3, ACC_GO=1, **hold)))
-    self.assertFalse(self._tx(self._das_3_msg(counter=5, **hold)))
-
-    excessive = hold.copy()
-    excessive["ACC_DECEL"] = -5.0
-    self.assertFalse(self._tx(self._das_3_msg(counter=3, **excessive)))
-    self.assertFalse(self._tx(self._das_3_msg(counter=3, ENGINE_TORQUE_REQUEST_MAX=1, **hold)))
-
-    self._rx(self._speed_msg(1))
     self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
-    self._rx(self._speed_msg(0))
 
-    self._rx(self._user_gas_msg(1))
-    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
-    self._rx(self._user_gas_msg(0))
 
-    self._rx(self._user_brake_msg(True))
-    self.assertFalse(self._tx(self._das_3_msg(counter=3, **hold)))
+class TestChryslerB6yHoldSafety(common.PandaSafetyTestBase):
+  # This focused class tests a payload-restricted subset of the same Chrysler
+  # safety mode; it is not a separate cross-mode TX allowlist.
+  TX_MSGS = None
+  SOURCE_TIMEOUT_US = 100_000
+  HOLD_PARAM = (
+    Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW |
+    Panda.FLAG_CHRYSLER_JEEP_LONG_ACTUATION
+  )
+
+  def setUp(self):
+    self.packer = CANPackerPanda("chrysler_pacifica_2017_hybrid_generated")
+    self.safety = libpanda_py.libpanda
+    self._reset_hold_safety()
+
+  def _reset_hold_safety(self):
+    self.safety.set_safety_hooks(Panda.SAFETY_CHRYSLER, self.HOLD_PARAM)
+    self.safety.init_tests()
+    self.safety.set_controls_allowed(False)
+
+  def _button_msg(self, cancel=False, resume=False):
+    values = {"ACC_Cancel": cancel, "ACC_Resume": resume}
+    return self.packer.make_can_msg_panda("CRUISE_BUTTONS", 0, values)
+
+  def _das_3_msg(self, counter=1, **changes):
+    values = {"COUNTER": counter}
+    values.update(changes)
+    return self.packer.make_can_msg_panda("DAS_3", 0, values)
+
+  def _speed_msg(self, speed):
+    values = {"SPEED_LEFT": speed, "SPEED_RIGHT": speed}
+    return self.packer.make_can_msg_panda("SPEED_1", 0, values)
+
+  def _user_gas_msg(self, gas):
+    values = {"Accelerator_Position": gas}
+    return self.packer.make_can_msg_panda("ECM_5", 0, values)
+
+  def _user_brake_msg(self, brake):
+    values = {"Brake_Pedal_State": 1 if brake else 0}
+    return self.packer.make_can_msg_panda("ESP_1", 0, values)
+
+  def _hold_msg(self, counter=3, **changes):
+    values = {
+      "ACC_AVAILABLE": 1,
+      "ACC_ACTIVE": 1,
+      "ACC_DECEL_REQ": 1,
+      "ACC_DECEL": -2.0,
+      "GR_MAX_REQ": 2,
+    }
+    values.update(changes)
+    return self._das_3_msg(counter=counter, **values)
+
+  def _enable_hold_sources(self, counter=1, time_us=1_000_000):
+    self.safety.set_timer(time_us)
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+
+  def test_exact_hold_frame_unlocks_only_recent_resume(self):
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
+    self._enable_hold_sources()
+    self.assertTrue(self._tx(self._hold_msg()))
+    self.assertTrue(self._tx(self._button_msg(resume=True)))
+
+    self.safety.set_timer(1_000_000 + self.SOURCE_TIMEOUT_US + 1)
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
+
+  def test_hold_requires_exact_proven_brake_only_payload(self):
+    self._enable_hold_sources()
+    self.assertTrue(self._tx(self._hold_msg()))
+
+    for changes in (
+      {"ACC_DECEL": -1.9},
+      {"ACC_DECEL": -2.1},
+      {"ACC_GO": 1},
+      {"ACC_STANDSTILL": 1},
+      {"ENGINE_TORQUE_REQUEST_MAX": 1},
+      {"GR_MAX_REQ": 3},
+      {"ACC_BRK_PREP": 1},
+      {"ACC_DECEL_REQ": 0},
+    ):
+      self._reset_hold_safety()
+      self._enable_hold_sources()
+      self.assertFalse(self._tx(self._hold_msg(**changes)))
+
+  def test_hold_rejects_bad_counter_and_bad_checksum(self):
+    self._enable_hold_sources(counter=1)
+    self.assertFalse(self._tx(self._hold_msg(counter=2)))
+    self.assertFalse(self._tx(self._hold_msg(counter=5)))
+
+    msg = self._hold_msg(counter=3)
+    dat = bytearray(msg.data)
+    dat[7] ^= 1
+    self.assertFalse(self._tx(common.make_msg(0, 0x1F4, dat=bytes(dat))))
+
+  def test_hold_fails_closed_on_motion_pedals_collision_and_stale_sources(self):
+    self._enable_hold_sources()
+    self.assertTrue(self._rx(self._speed_msg(1)))
+    self.assertFalse(self._tx(self._hold_msg()))
+
+    self._reset_hold_safety()
+    self._enable_hold_sources()
+    self.assertTrue(self._rx(self._user_gas_msg(1)))
+    self.assertFalse(self._tx(self._hold_msg()))
+
+    self._reset_hold_safety()
+    self._enable_hold_sources()
+    self.assertTrue(self._rx(self._user_brake_msg(True)))
+    self.assertFalse(self._tx(self._hold_msg()))
+
+    self._reset_hold_safety()
+    self._enable_hold_sources()
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, COLLISION_BRK_PREP=1,
+    )))
+    self.assertFalse(self._tx(self._hold_msg(counter=4)))
+
+    self._reset_hold_safety()
+    self._enable_hold_sources(time_us=2_000_000)
+    self.safety.set_timer(2_000_000 + self.SOURCE_TIMEOUT_US + 1)
+    self.assertFalse(self._tx(self._hold_msg()))
+
+  def test_cancel_clears_special_resume_authority(self):
+    self._enable_hold_sources()
+    self.assertTrue(self._tx(self._hold_msg()))
+    self.assertTrue(self._tx(self._button_msg(cancel=True)))
+    self.assertFalse(self._tx(self._button_msg(resume=True)))
 
 
 class TestJeepRate4Limits(unittest.TestCase):
