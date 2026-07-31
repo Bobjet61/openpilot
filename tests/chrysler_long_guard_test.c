@@ -13,6 +13,14 @@ static bool valid_brake_command(void) {
 int main(void) {
   assert(CHRYSLER_LONG_ACTUATION == 1U);
 
+  // Diagnostic packing preserves the two raw factory DAS_3 words and the
+  // exact output engine word in their original byte order.
+  assert(chrysler_long_status_diagnostic_word(0xB7U, 0xA55AU, 0xC3U) ==
+         0xC3A55AB7U);
+  assert(chrysler_long_command_diagnostic_low(0xA583U) == 0xA58301C1U);
+  assert(chrysler_long_command_diagnostic_high(0x8960U, 0x7C4DU) ==
+         0x7C4D8960U);
+
   assert(chrysler_long_is_fresh(1000000U, 950000U, true, 100000U));
   assert(!chrysler_long_is_fresh(1000000U, 899999U, true, 100000U));
   assert(!chrysler_long_is_fresh(1000000U, 950000U, false, 100000U));

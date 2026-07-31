@@ -50,6 +50,9 @@ static uint16_t chrysler_long_guard_failure_mask = 0xFFFFU;
 static uint8_t chrysler_long_diag_status = CHRYSLER_LONG_DIAG_SIGNATURE;
 static uint16_t chrysler_long_diag_failure_mask = 0xFFFFU;
 static uint8_t chrysler_long_diag_counters = 0U;
+static uint16_t chrysler_long_diag_stock_engine_word = 0U;
+static uint16_t chrysler_long_diag_output_engine_word = 0U;
+static uint16_t chrysler_long_diag_stock_accel_word = 0U;
 
 static void chrysler_steering_update_guard(void) {
   steer_type = chrysler_steer_mode_from_stock_das3(
@@ -320,6 +323,10 @@ static void send_apa_signature(CAN_FIFOMailBox_TypeDef *to_fwd){
 
 static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   int crc;
+  chrysler_long_diag_stock_engine_word =
+    (uint16_t)(to_fwd->RDLR & 0xFFFFU);
+  chrysler_long_diag_stock_accel_word =
+    (uint16_t)((to_fwd->RDLR >> 16) & 0xFFFFU);
   chrysler_long_update_guard();
 
   const bool applied = is_oplong_enabled && !org_collision_active;
@@ -363,6 +370,8 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     to_fwd->RDLR |= 0x00000000;
     to_fwd->RDHR |= 0x00000000;
   }
+  chrysler_long_diag_output_engine_word =
+    (uint16_t)(to_fwd->RDLR & 0xFFFFU);
 }
 
 static void send_acc_dash_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
@@ -389,14 +398,26 @@ static void send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   to_fwd->RDHR = chrysler_long_wheel_button_passthrough(to_fwd->RDHR);
 }
 
-void chrysler_wp(void) {
-  CAN1->sTxMailBox[0].TDLR =
-    (uint32_t)chrysler_long_diag_status |
-    (uint32_t)(chrysler_long_diag_failure_mask & 0xFFU) << 8 |
-    (uint32_t)((chrysler_long_diag_failure_mask >> 8) & 0xFFU) << 16 |
-    (uint32_t)chrysler_long_diag_counters << 24;
-  CAN1->sTxMailBox[0].TDTR = 4;
-  CAN1->sTxMailBox[0].TIR = (0x4FFU << 21) | 1U;
+static void create_chrysler_wp_status_diagnostic(
+    CAN_FIFOMailBox_TypeDef *to_send) {
+  to_send->RIR = (0x4FFU << 21) | 1U;
+  to_send->RDTR = 4U;
+  to_send->RDLR = chrysler_long_status_diagnostic_word(
+    chrysler_long_diag_status,
+    chrysler_long_diag_failure_mask,
+    chrysler_long_diag_counters);
+  to_send->RDHR = 0U;
+}
+
+static void create_chrysler_wp_command_diagnostic(
+    CAN_FIFOMailBox_TypeDef *to_send) {
+  to_send->RIR = (0x4FEU << 21) | 1U;
+  to_send->RDTR = 8U;
+  to_send->RDLR = chrysler_long_command_diagnostic_low(
+    chrysler_long_diag_stock_engine_word);
+  to_send->RDHR = chrysler_long_command_diagnostic_high(
+    chrysler_long_diag_output_engine_word,
+    chrysler_long_diag_stock_accel_word);
 }
 
 int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {

@@ -488,13 +488,23 @@ void can_rx(uint8_t can_number) {
           send_wheel_button_msg(&to_send_mod);
           can_send(&to_send_mod, 1, true);
         }
-        chrysler_wp();
      }
 
      if (bus_number == 1) {
         if (addr == 500) { //0x1f4
           send_acc_decel_msg(&to_send_mod);
           can_send(&to_send_mod, 0, true);
+
+          // Emit both diagnostic records at the stock DAS_3 rate through the
+          // normal queue. This avoids the old ~800 Hz direct-mailbox flood and
+          // records the factory/output command pair used for fault analysis.
+          CAN_FIFOMailBox_TypeDef status_diagnostic;
+          create_chrysler_wp_status_diagnostic(&status_diagnostic);
+          can_send(&status_diagnostic, 0, true);
+
+          CAN_FIFOMailBox_TypeDef command_diagnostic;
+          create_chrysler_wp_command_diagnostic(&command_diagnostic);
+          can_send(&command_diagnostic, 0, true);
          }
         if (addr == 501) { //0x1f5
           send_acc_dash_msg(&to_send_mod);

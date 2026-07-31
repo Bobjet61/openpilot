@@ -1,47 +1,53 @@
-# Chrysler longitudinal safety shadow
+# Chrysler guarded longitudinal control
 
-Base: exact installed White Panda firmware commit
-`b11da4d31097e5d210f94f5b0fe76cb9726ef2b5`.
+`wp-b6h` is the White Panda half of the Jeep moving-only longitudinal
+controller. It is derived from the Chrysler Advanced firmware and assumes the
+vehicle's factory `DAS_3` source is isolated on physical White Panda CAN2
+(firmware bus 1). Do not use this firmware on a different wiring topology.
 
-Actuation is hard-coded off. The branch adds an independent guard around the
-recovered Chrysler Advanced longitudinal protocol:
+Actuation is compiled on, but every forwarded command remains behind the
+independent White Panda guard:
 
-- freshness watchdogs for `0x1F6`, `0x1F7`, `0x272`, real speed, both
-  driver pedals, and the factory ACC/AEB state;
-- driver brake and gas cancellation;
-- stock collision/AEB pass-through;
-- command-type validation;
-- calibrated -3.0 m/s^2 braking and 100 Nm DAS_3 engine-torque ceilings;
-- `0x22F` ECM_5 accelerator, `0x140` brake-pedal, and `0x202` wheel-speed
-  sources selected from 130.2 minutes of stock Jeep logs;
-- stop/go, standstill, brake-prep, and brake-hold requests rejected;
+- freshness watchdogs for private `0x1F6`, `0x1F7`, and `0x272` commands,
+  wheel speed, both driver pedals, and factory ACC/AEB state;
+- driver brake and gas cancellation plus stock collision/AEB pass-through;
+- a minimum moving speed of approximately 2.06 m/s;
+- stop, go, standstill, brake preparation, and brake hold rejected;
 - mutually exclusive braking and propulsion;
-- an FCA checksum plus one shared rolling 4-bit counter on all three private
-  frames, with duplicate, skipped, corrupt, and cross-frame-mismatched cycles
-  rejected;
-- factory `0x1F7` DAS_4 dashboard data always passed through unchanged.
+- a calibrated -3.0 m/s² braking ceiling and the existing 100 Nm `DAS_3`
+  engine-torque ceiling;
+- one shared rolling 4-bit counter and FCA checksum on the complete private
+  command set, with incomplete, stale, corrupt, duplicate, or mismatched
+  cycles rejected;
+- factory `DAS_4`, `DAS_5`, and steering-wheel button traffic passed through
+  unchanged; and
+- factory `DAS_3` fault, collision, counter, and unrelated bits preserved.
 
-This branch is for source review, replay, and bench testing only. Do not flash
-it to the vehicle.
+## b6h diagnostics and transport
 
-Validation on 2026-07-25:
+The host sends a complete command snapshot at a nominal 25 Hz. The White Panda
+holds the last complete valid snapshot while processing the factory 50 Hz
+`DAS_3` stream. This removes the short-interval cycles observed with the b6g
+20 ms gate while remaining comfortably inside the 100 ms freshness watchdog.
 
-- the standalone guard test passed with `-Wall -Wextra -Werror`;
-- the complete ARM firmware compiled, linked, and signed with warnings treated
-  as errors;
-- the resulting temporary image was 45,100 bytes, below the 49,152-byte limit;
-- no firmware artifact was retained or flashed.
-- offline replay opened all 131 downloaded rlogs and accepted all 284,095
-  eligible shadow cycles with zero envelope or hard-off violations;
-- all 5,619 sampled instances of each fault class were rejected, including
-  duplicate counters and payload corruption;
-- the short end-of-drive segment contains 51,085 readable events followed by a
-  corrupt/truncated final event; its readable portion was replayed and the tail
-  is retained as a non-blocking data caveat.
+The former direct-mailbox `0x4FF` beacon was emitted for almost every CAN1
+receive interrupt. b6h queues it once per factory `DAS_3` frame instead. It
+also queues diagnostic-only `0x4FE`, whose payload contains:
 
-The stock logs also showed that this EcoDiesel requests propulsion through
-`0x1F4` DAS_3 engine torque, not `0x271` DAS_5 wheel torque. The shadow rewrite
-now leaves DAS_5 unchanged and places the bounded private torque request in
-DAS_3. Before actuation can be considered, the comma 3X Panda still needs an
-independent transmit safety policy, and recorded-drive replay plus an isolated
-bench test must pass.
+1. signature `0xC1` and layout version 1;
+2. the exact factory `DAS_3` engine-command bytes before substitution;
+3. the exact engine-command bytes forwarded to the vehicle; and
+4. the exact factory ACC acceleration/availability bytes.
+
+Neither diagnostic frame participates in a guard decision or carries an
+actuation command.
+
+## Local validation on 2026-07-31
+
+- the standalone guard suite passed with `-Wall -Wextra -Werror`;
+- the complete ARM firmware compiled and linked with warnings treated as
+  errors;
+- the debug image signed successfully at 46,776 bytes, below the 49,152-byte
+  firmware limit; and
+- no b6h firmware was flashed and no b6h host build was installed during this
+  validation.

@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// b8y actuation build. This remains source-controlled and cannot be enabled or
+// b6h actuation build. This remains source-controlled and cannot be enabled or
 // altered with a compiler flag. Runtime output still requires every freshness,
 // integrity, pedal, collision, speed, and command-envelope check below.
 #ifdef CHRYSLER_LONG_ACTUATION
@@ -44,15 +44,45 @@
 // standstill, stop, go, brake preparation, and hold behavior.
 #define CHRYSLER_LONG_MOVING_SPEED_MIN_RAW 29  // approximately 2.06 m/s
 
-// The existing 0x4FF White Panda beacon remains four bytes long. Its first
-// byte keeps a fixed high-nibble signature and four outcome bits; the middle
-// two bytes carry this diagnostic failure mask. This changes no CAN identifier,
-// payload length, or actuation field and never participates in guard logic.
+// The existing 0x4FF White Panda beacon remains four bytes long. b6h emits it
+// once per stock 50 Hz DAS_3 frame through the normal transmit queue rather
+// than writing a hardware mailbox for every CAN1 receive interrupt.
 #define CHRYSLER_LONG_DIAG_SIGNATURE 0xB0U
 #define CHRYSLER_LONG_DIAG_APPLIED (1U << 0)
 #define CHRYSLER_LONG_DIAG_HOST_REQUESTED (1U << 1)
 #define CHRYSLER_LONG_DIAG_BRAKE_REQUESTED (1U << 2)
 #define CHRYSLER_LONG_DIAG_ENGINE_REQUESTED (1U << 3)
+
+// A separate diagnostic-only frame records the factory command before
+// substitution and the command actually forwarded to the vehicle. The first
+// two bytes identify the layout; the remaining bytes preserve the original
+// DAS_3 byte pairs exactly so analysis does not depend on firmware rounding.
+#define CHRYSLER_LONG_COMMAND_DIAG_SIGNATURE 0xC1U
+#define CHRYSLER_LONG_COMMAND_DIAG_VERSION 1U
+
+static inline uint32_t chrysler_long_status_diagnostic_word(
+    const uint8_t status,
+    const uint16_t failure_mask,
+    const uint8_t counters) {
+  return (uint32_t)status |
+         (uint32_t)(failure_mask & 0xFFU) << 8 |
+         (uint32_t)((failure_mask >> 8) & 0xFFU) << 16 |
+         (uint32_t)counters << 24;
+}
+
+static inline uint32_t chrysler_long_command_diagnostic_low(
+    const uint16_t stock_engine_word) {
+  return (uint32_t)CHRYSLER_LONG_COMMAND_DIAG_SIGNATURE |
+         (uint32_t)CHRYSLER_LONG_COMMAND_DIAG_VERSION << 8 |
+         (uint32_t)stock_engine_word << 16;
+}
+
+static inline uint32_t chrysler_long_command_diagnostic_high(
+    const uint16_t output_engine_word,
+    const uint16_t stock_accel_word) {
+  return (uint32_t)output_engine_word |
+         (uint32_t)stock_accel_word << 16;
+}
 
 #define CHRYSLER_LONG_DIAG_ACTUATION_DISABLED (1U << 0)
 #define CHRYSLER_LONG_DIAG_HOST_NOT_REQUESTED (1U << 1)
