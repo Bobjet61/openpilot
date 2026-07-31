@@ -176,6 +176,14 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertIn("if not CC.longActive:", carcontroller_source)
     self.assertIn("CC.actuators.accel", carcontroller_source)
+    self.assertIn(
+      "requested_accel,\n        jeep_long_vehicle_eligible,",
+      carcontroller_source,
+    )
+    self.assertNotIn(
+      "self.jeep_long_plan_result.eligible",
+      carcontroller_source,
+    )
 
     interface_source = INTERFACE_PATH.read_text(encoding="utf-8")
     self.assertIn(
@@ -386,6 +394,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
 
   def test_transport_scheduler_enforces_margin_and_counts_only_sends(self):
+    self.assertGreaterEqual(TRANSPORT_MIN_SEND_INTERVAL_NS, 20_000_000)
     scheduler = JeepLongitudinalTransportScheduler()
     self.assertEqual(scheduler.next_counter(1_000_000_000, True), 0)
     self.assertIsNone(
@@ -440,7 +449,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertTrue(
       all(
-        current[0] - previous[0] >= 18
+        current[0] - previous[0] >= 20
         for previous, current in zip(sent, sent[1:])
       )
     )

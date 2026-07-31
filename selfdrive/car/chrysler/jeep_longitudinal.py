@@ -56,9 +56,11 @@ JERK_DOWN = 2.0
 # 2.06 m/s). Stop, go, brake preparation, and hold remain unavailable.
 MIN_ACTIVE_SPEED_MPS = 2.1
 
-# The embedded Panda rejects private cycles closer than 15 ms. Leave 3 ms of
-# scheduling margin, and advance the counter only for cycles actually sent.
-TRANSPORT_MIN_SEND_INTERVAL_NS = 18_000_000
+# The embedded Panda rejects private cycles closer than 15 ms. Road logs showed
+# that an 18 ms host-side interval could still arrive below that limit after
+# USB/CAN scheduling jitter, so retain a full 5 ms margin at the sender.
+# Advance the counter only for cycles actually sent.
+TRANSPORT_MIN_SEND_INTERVAL_NS = 20_000_000
 
 # Recovered from the Chrysler Advanced implementation. This is logged for
 # calibration only; it is not transmitted by this branch.

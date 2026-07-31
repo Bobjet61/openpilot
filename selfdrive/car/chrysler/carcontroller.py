@@ -174,13 +174,13 @@ class CarController(CarControllerBase):
           if self.jeep_long_plan_result is not None else 0.0
         )
       )
-      plan_eligible = (
-        self.jeep_long_plan_result.eligible
-        if self.jeep_long_plan_result is not None else False
-      )
+      # CC.actuators.accel is already the output of openpilot's production
+      # longitudinal controller. The separate plan subscriber remains useful
+      # for telemetry, but its transient service-valid flag must not reset the
+      # actuator jerk ramp or alternate between stock and openpilot commands.
       self.jeep_long_envelope = self.jeep_long_shadow.update(
         requested_accel,
-        plan_eligible,
+        jeep_long_vehicle_eligible,
       )
       self.jeep_long_shadow_frames = []
       self.jeep_long_transport_frames = []
