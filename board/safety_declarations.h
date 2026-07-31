@@ -126,11 +126,9 @@ int org_cmd_type = 0;
 bool org_brk_pul = false;
 bool org_collision_active = false;
 
-int counter_284_502 = 0;
 int counter_284 = 0;
 int counter_284_658 = 0;
 int counter_658 = 0;
-int counter_502 = 0;
 
 // for safety modes with torque steering control
 int desired_torque_last = 0;       // last desired steer torque

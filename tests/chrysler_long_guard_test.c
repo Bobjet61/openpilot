@@ -26,6 +26,19 @@ int main(void) {
   assert(!chrysler_long_is_fresh(1000000U, 950000U, false, 100000U));
   assert(chrysler_long_is_fresh(50U, 0xFFFFFFF0U, true, 100U));
 
+  // A healthy 25 Hz private snapshot remains fresh throughout the independent
+  // 50 Hz stock receive cadence. Liveness depends on elapsed time, not on a
+  // comparison between the two unrelated frame counts.
+  uint32_t last_private_ts = 0U;
+  for (uint32_t stock_cycle = 0U; stock_cycle < 500U; stock_cycle++) {
+    const uint32_t now = stock_cycle * 20000U;
+    if ((stock_cycle % 2U) == 0U) {
+      last_private_ts = now;
+    }
+    assert(chrysler_long_is_fresh(
+      now, last_private_ts, true, CHRYSLER_LONG_BRAKE_TIMEOUT_US));
+  }
+
   bool counter_seen = false;
   int counter_last = 0;
   assert(chrysler_long_counter_step_valid(&counter_seen, &counter_last, 14));

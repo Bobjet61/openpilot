@@ -446,18 +446,10 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
   }
 
   if ((addr == 284) && (bus_num == 0)) {
-    if (counter_502 > 0) {
-        counter_284_502 += 1;
-        if (counter_284_502 - counter_502 > 25) {
-            chrysler_long_brake_valid = false;
-            chrysler_long_invalidate_committed_cycle();
-            acc_enabled = false;
-            counter_502 = 0;
-            counter_284_502 = 0;
-            chrysler_long_update_guard();
-        }
-    }
-
+    // Longitudinal command liveness is enforced by the monotonic 100 ms
+    // timestamp watchdogs above. Do not compare the 50 Hz stock 0x11C count
+    // with the independent 25 Hz private 0x1F6 count: that legacy comparison
+    // necessarily drifted and invalidated a healthy command once per second.
     if (counter_658 > 0) {
         counter_284_658 += 2;
         if (counter_284_658 - counter_658 > 25){
@@ -505,7 +497,6 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
       chrysler_long_invalidate_committed_cycle();
     }
     chrysler_long_last_brake_ts = now;
-    counter_502 += 1;
     chrysler_long_try_commit_staged_cycle(now);
     chrysler_long_update_guard();
   }

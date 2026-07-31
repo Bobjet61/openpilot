@@ -1,6 +1,6 @@
 # Chrysler guarded longitudinal control
 
-`wp-b6h` is the White Panda half of the Jeep moving-only longitudinal
+`wp-b6i` is the White Panda half of the Jeep moving-only longitudinal
 controller. It is derived from the Chrysler Advanced firmware and assumes the
 vehicle's factory `DAS_3` source is isolated on physical White Panda CAN2
 (firmware bus 1). Do not use this firmware on a different wiring topology.
@@ -42,12 +42,24 @@ also queues diagnostic-only `0x4FE`, whose payload contains:
 Neither diagnostic frame participates in a guard decision or carries an
 actuation command.
 
-## Local validation on 2026-07-31
+## b6i watchdog correction
+
+On-road b6h telemetry confirmed that the private command set arrived cleanly
+at a nominal 25 Hz, but also exposed a legacy count-difference watchdog. It
+compared the 50 Hz stock `0x11C` frame count with the independent 25 Hz private
+`0x1F6` frame count, so the difference necessarily exceeded its threshold and
+invalidated a healthy committed command approximately once every 1.04 seconds.
+
+b6i removes only that mismatched-rate count comparison. The independent 100 ms
+monotonic freshness watchdogs, shared rolling counter, checksums, atomic-cycle
+commit, command envelope, pedal cancellation, speed floor, collision/AEB
+pass-through, and factory fault preservation remain unchanged.
+
+## b6i local validation on 2026-07-31
 
 - the standalone guard suite passed with `-Wall -Wextra -Werror`;
 - the complete ARM firmware compiled and linked with warnings treated as
   errors;
-- the debug image signed successfully at 46,776 bytes, below the 49,152-byte
+- the debug image signed successfully at 46,712 bytes, below the 49,152-byte
   firmware limit; and
-- no b6h firmware was flashed and no b6h host build was installed during this
-  validation.
+- no b6i firmware was flashed during this validation.
