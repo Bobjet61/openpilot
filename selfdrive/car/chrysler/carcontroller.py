@@ -563,6 +563,19 @@ class CarController(CarControllerBase):
       f"private_counter={diagnostic.private_counter},"
       f"stock_counter={diagnostic.stock_counter}"
     )
+    command = CS.wp_long_command_diagnostic
+    if command is not None:
+      cloudlog.info(
+        f"Jeep WP command diagnostic: valid={command.valid},"
+        f"version={command.version},"
+        f"stock_engine={command.stock_engine_active},"
+        f"stock_torque={command.stock_engine_torque_nm:.2f},"
+        f"output_engine={command.output_engine_active},"
+        f"output_torque={command.output_engine_torque_nm:.2f},"
+        f"stock_acc_available={command.stock_acc_available},"
+        f"stock_acc_active={command.stock_acc_active},"
+        f"stock_accel={command.stock_accel_mps2:.4f}"
+      )
 
   def log_jeep_radar_shadow(self, CS):
     selection = self.jeep_radar_shadow_selection

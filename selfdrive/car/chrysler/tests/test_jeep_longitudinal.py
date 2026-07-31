@@ -32,6 +32,7 @@ JeepLongitudinalShadow = LONG.JeepLongitudinalShadow
 JeepLongitudinalTransportScheduler = LONG.JeepLongitudinalTransportScheduler
 TRANSPORT_MIN_SEND_INTERVAL_NS = LONG.TRANSPORT_MIN_SEND_INTERVAL_NS
 decode_wp_long_diagnostic = LONG.decode_wp_long_diagnostic
+decode_wp_long_command_diagnostic = LONG.decode_wp_long_command_diagnostic
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
@@ -138,6 +139,30 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     diagnostic = decode_wp_long_diagnostic(0, 0, 0, 0)
     self.assertFalse(diagnostic.valid)
     self.assertEqual(diagnostic.failure_reasons, ("unsupported_beacon",))
+
+  def test_white_panda_command_diagnostic_compares_factory_and_output(self):
+    diagnostic = decode_wp_long_command_diagnostic(
+      0xC1, 1,
+      1, 160.75,
+      1, 100.0,
+      1, 1, -0.65,
+    )
+    self.assertTrue(diagnostic.valid)
+    self.assertTrue(diagnostic.stock_engine_active)
+    self.assertAlmostEqual(diagnostic.stock_engine_torque_nm, 160.75)
+    self.assertTrue(diagnostic.output_engine_active)
+    self.assertAlmostEqual(diagnostic.output_engine_torque_nm, 100.0)
+    self.assertTrue(diagnostic.stock_acc_available)
+    self.assertTrue(diagnostic.stock_acc_active)
+    self.assertAlmostEqual(diagnostic.stock_accel_mps2, -0.65)
+
+    unsupported = decode_wp_long_command_diagnostic(
+      0xC1, 2,
+      0, 0.0,
+      0, 0.0,
+      0, 0, 0.0,
+    )
+    self.assertFalse(unsupported.valid)
 
   def test_transport_and_actuation_are_compiled_on_for_b8y(self):
     self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
@@ -363,6 +388,14 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(result.engine_active)
     self.assertEqual(result.engine_torque_nm, 0.0)
 
+  def test_one_mps2_reaches_existing_engine_torque_ceiling(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(60):
+      result = shadow.update(1.0, eligible=True)
+    self.assertEqual(result.limited_accel, ACCEL_MAX)
+    self.assertTrue(result.engine_active)
+    self.assertEqual(result.engine_torque_nm, 100.0)
+
   def test_fca_checksum_ignores_only_final_byte(self):
     payload = bytearray.fromhex("1020304050607000")
     checksum = fca_checksum(payload)
@@ -394,7 +427,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
 
   def test_transport_scheduler_enforces_margin_and_counts_only_sends(self):
-    self.assertGreaterEqual(TRANSPORT_MIN_SEND_INTERVAL_NS, 20_000_000)
+    self.assertEqual(TRANSPORT_MIN_SEND_INTERVAL_NS, 25_000_000)
     scheduler = JeepLongitudinalTransportScheduler()
     self.assertEqual(scheduler.next_counter(1_000_000_000, True), 0)
     self.assertIsNone(
@@ -445,11 +478,11 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     ]
     self.assertEqual(
       sent,
-      [(0, 0), (20, 1), (40, 2), (74, 3), (94, 4), (134, 5), (154, 6)],
+      [(0, 0), (40, 1), (74, 2), (134, 3)],
     )
     self.assertTrue(
       all(
-        current[0] - previous[0] >= 20
+        current[0] - previous[0] >= 25
         for previous, current in zip(sent, sent[1:])
       )
     )

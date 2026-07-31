@@ -56,15 +56,21 @@ JERK_DOWN = 2.0
 # 2.06 m/s). Stop, go, brake preparation, and hold remain unavailable.
 MIN_ACTIVE_SPEED_MPS = 2.1
 
-# The embedded Panda rejects private cycles closer than 15 ms. Road logs showed
-# that an 18 ms host-side interval could still arrive below that limit after
-# USB/CAN scheduling jitter, so retain a full 5 ms margin at the sender.
+# The embedded Panda rejects private cycles closer than 15 ms. Even a 20 ms
+# sender interval occasionally arrived below that threshold after USB/CAN
+# scheduling jitter. The controller offers a cycle every 20 ms, so this 25 ms
+# gate deliberately selects every other opportunity (nominally 25 Hz), leaving
+# enough arrival-time margin while the White Panda safely holds a complete
+# command snapshot between the stock 50 Hz DAS_3 frames.
 # Advance the counter only for cycles actually sent.
-TRANSPORT_MIN_SEND_INTERVAL_NS = 20_000_000
+TRANSPORT_MIN_SEND_INTERVAL_NS = 25_000_000
 
-# Recovered from the Chrysler Advanced implementation. This is logged for
-# calibration only; it is not transmitted by this branch.
-VEHICLE_MASS_SCALE_KG = 1200.0
+# Recovered from the Chrysler Advanced implementation and used only to map the
+# bounded acceleration request into the existing guarded torque envelope.
+# Make the production controller's bounded +1.0 m/s^2 command reach the
+# already-enforced 100 Nm host and White Panda ceiling. b6g used 1200/15.5,
+# which topped out at only 77.4 Nm and could not maintain speed in the Jeep.
+VEHICLE_MASS_SCALE_KG = 1550.0
 NON_HYBRID_GEAR_RATIO = 15.5
 ENGINE_TORQUE_MAX_NM = 100.0
 
@@ -119,6 +125,19 @@ class JeepLongitudinalDiagnostic:
   stock_counter: int
 
 
+@dataclass(frozen=True)
+class JeepLongitudinalCommandDiagnostic:
+  valid: bool
+  version: int
+  stock_engine_active: bool
+  stock_engine_torque_nm: float
+  output_engine_active: bool
+  output_engine_torque_nm: float
+  stock_acc_available: bool
+  stock_acc_active: bool
+  stock_accel_mps2: float
+
+
 def decode_wp_long_diagnostic(
     status: int,
     failure_low: int,
@@ -145,6 +164,31 @@ def decode_wp_long_diagnostic(
     failure_reasons=failure_reasons,
     private_counter=(counters >> 4) & 0xF,
     stock_counter=counters & 0xF,
+  )
+
+
+def decode_wp_long_command_diagnostic(
+    signature: int,
+    version: int,
+    stock_engine_active: int,
+    stock_engine_torque_nm: float,
+    output_engine_active: int,
+    output_engine_torque_nm: float,
+    stock_acc_available: int,
+    stock_acc_active: int,
+    stock_accel_mps2: float,
+) -> JeepLongitudinalCommandDiagnostic:
+  version = int(version) & 0xFF
+  return JeepLongitudinalCommandDiagnostic(
+    valid=(int(signature) & 0xFF) == 0xC1 and version == 1,
+    version=version,
+    stock_engine_active=bool(stock_engine_active),
+    stock_engine_torque_nm=float(stock_engine_torque_nm),
+    output_engine_active=bool(output_engine_active),
+    output_engine_torque_nm=float(output_engine_torque_nm),
+    stock_acc_available=bool(stock_acc_available),
+    stock_acc_active=bool(stock_acc_active),
+    stock_accel_mps2=float(stock_accel_mps2),
   )
 
 

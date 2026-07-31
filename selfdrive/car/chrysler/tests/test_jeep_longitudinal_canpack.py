@@ -59,6 +59,31 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
     self.assertEqual(raw, 2400)
     self.assertEqual(dat[4] >> 7, 1)
 
+  def test_command_diagnostic_preserves_factory_and_output_das3_fields(self):
+    addr, bus, dat, _ = self.packer.make_can_msg(
+      "WP_LONG_COMMAND_DIAGNOSTIC", 0,
+      {
+        "SIGNATURE": 0xC1,
+        "LAYOUT_VERSION": 1,
+        "STOCK_ENGINE_TORQUE_REQUEST_MAX": 1,
+        "STOCK_ENGINE_TORQUE_REQUEST": 160.75,
+        "OUTPUT_ENGINE_TORQUE_REQUEST_MAX": 1,
+        "OUTPUT_ENGINE_TORQUE_REQUEST": 100.0,
+        "STOCK_ACC_AVAILABLE": 1,
+        "STOCK_ACC_ACTIVE": 1,
+        "STOCK_ACC_DECEL": -0.65,
+      },
+    )
+    self.assertEqual((addr, bus, len(dat)), (0x4FE, 0, 8))
+    self.assertEqual(dat[:2], bytes((0xC1, 1)))
+    self.assertEqual(((dat[2] & 0x1F) << 8) | dat[3], 2643)
+    self.assertEqual(dat[2] >> 7, 1)
+    self.assertEqual(((dat[4] & 0x1F) << 8) | dat[5], 2400)
+    self.assertEqual(dat[4] >> 7, 1)
+    stock_accel_raw = ((dat[6] & 0xF) << 8) | dat[7]
+    self.assertEqual(stock_accel_raw, round((-0.65 + 16.0) / 0.004885))
+    self.assertEqual((dat[6] >> 4) & 0x3, 0x3)
+
   def test_private_brake_range_and_inactive_sentinel(self):
     _, _, inactive, _ = self.packer.make_can_msg(
       "WP_ACC_BRAKE_CMD", 0,

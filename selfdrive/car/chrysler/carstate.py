@@ -9,6 +9,7 @@ from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import (
   RADAR_MSGS_D,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
+  decode_wp_long_command_diagnostic,
   decode_wp_long_diagnostic,
 )
 from openpilot.selfdrive.car.chrysler.values import (
@@ -44,6 +45,7 @@ class CarState(CarStateBase):
     self.acc_decelerating = False
     self.das_3 = {}
     self.wp_long_diagnostic = None
+    self.wp_long_command_diagnostic = None
 
     self.lkas_enabled = False
     self.prev_lkas_enabled = False
@@ -161,6 +163,18 @@ class CarState(CarStateBase):
         int(wp_diag["FAILURE_HIGH"]),
         int(wp_diag["COUNTERS"]),
       )
+      wp_command_diag = cp.vl["WP_LONG_COMMAND_DIAGNOSTIC"]
+      self.wp_long_command_diagnostic = decode_wp_long_command_diagnostic(
+        int(wp_command_diag["SIGNATURE"]),
+        int(wp_command_diag["LAYOUT_VERSION"]),
+        int(wp_command_diag["STOCK_ENGINE_TORQUE_REQUEST_MAX"]),
+        float(wp_command_diag["STOCK_ENGINE_TORQUE_REQUEST"]),
+        int(wp_command_diag["OUTPUT_ENGINE_TORQUE_REQUEST_MAX"]),
+        float(wp_command_diag["OUTPUT_ENGINE_TORQUE_REQUEST"]),
+        int(wp_command_diag["STOCK_ACC_AVAILABLE"]),
+        int(wp_command_diag["STOCK_ACC_ACTIVE"]),
+        float(wp_command_diag["STOCK_ACC_DECEL"]),
+      )
 
     return ret
 
@@ -211,6 +225,7 @@ class CarState(CarStateBase):
       # decisions. Older White Panda firmware sends four zero bytes, which the
       # decoder reports as unsupported without changing vehicle behavior.
       messages.append(("WP_LONG_DIAGNOSTIC", 0))
+      messages.append(("WP_LONG_COMMAND_DIAGNOSTIC", 0))
 
     return CANParser(DBC[CP.carFingerprint]["pt"], messages, 0)
 
