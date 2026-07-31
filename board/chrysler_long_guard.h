@@ -145,6 +145,17 @@ static inline uint32_t chrysler_long_wheel_button_passthrough(
   return word;
 }
 
+// The factory ACC module supervises its normal braking request in DAS_3. The
+// two b6i road faults occurred after command type 1 was replaced by an openpilot
+// propulsion command. Defer that frame to factory ACC immediately; collision
+// and AEB frames remain covered by the existing stock_collision guard.
+static inline bool chrysler_long_should_substitute_das3(
+    const bool guard_enabled,
+    const bool stock_collision,
+    const int stock_command_type) {
+  return guard_enabled && !stock_collision && (stock_command_type == 0);
+}
+
 static inline bool chrysler_long_counters_aligned(
     const bool brake_seen, const int brake_counter,
     const bool dash_seen, const int dash_counter,

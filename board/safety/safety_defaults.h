@@ -329,7 +329,11 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     (uint16_t)((to_fwd->RDLR >> 16) & 0xFFFFU);
   chrysler_long_update_guard();
 
-  const bool applied = is_oplong_enabled && !org_collision_active;
+  // Use the command type from this exact stock frame so a factory braking
+  // request is passed through without waiting for any later state update.
+  const int stock_command_type = (GET_BYTE(to_fwd, 4) >> 4) & 0x7;
+  const bool applied = chrysler_long_should_substitute_das3(
+    is_oplong_enabled, org_collision_active, stock_command_type);
   const int stock_counter = (GET_BYTE(to_fwd, 6) >> 4) & 0xF;
   chrysler_long_diag_status =
     CHRYSLER_LONG_DIAG_SIGNATURE |

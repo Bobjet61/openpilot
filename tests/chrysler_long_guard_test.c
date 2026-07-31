@@ -26,6 +26,14 @@ int main(void) {
   assert(!chrysler_long_is_fresh(1000000U, 950000U, false, 100000U));
   assert(chrysler_long_is_fresh(50U, 0xFFFFFFF0U, true, 100U));
 
+  // Reproduce the b6i fault arbitration: openpilot may substitute a normal
+  // propulsion frame, but the same-frame factory brake request must win.
+  assert(chrysler_long_should_substitute_das3(true, false, 0));
+  assert(!chrysler_long_should_substitute_das3(true, false, 1));
+  assert(!chrysler_long_should_substitute_das3(true, true, 2));
+  assert(!chrysler_long_should_substitute_das3(true, false, 7));
+  assert(!chrysler_long_should_substitute_das3(false, false, 0));
+
   // A healthy 25 Hz private snapshot remains fresh throughout the independent
   // 50 Hz stock receive cadence. Liveness depends on elapsed time, not on a
   // comparison between the two unrelated frame counts.

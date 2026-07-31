@@ -1,6 +1,6 @@
 # Chrysler guarded longitudinal control
 
-`wp-b6i` is the White Panda half of the Jeep moving-only longitudinal
+`wp-b6j` is the White Panda half of the Jeep moving-only longitudinal
 controller. It is derived from the Chrysler Advanced firmware and assumes the
 vehicle's factory `DAS_3` source is isolated on physical White Panda CAN2
 (firmware bus 1). Do not use this firmware on a different wiring topology.
@@ -54,6 +54,25 @@ b6i removes only that mismatched-rate count comparison. The independent 100 ms
 monotonic freshness watchdogs, shared rolling counter, checksums, atomic-cycle
 commit, command envelope, pedal cancellation, speed floor, collision/AEB
 pass-through, and factory fault preservation remain unchanged.
+
+## b6j factory-brake arbitration
+
+Two b6i drives produced repeatable factory ACC faults after the driver lowered
+the selected speed. In each case, factory `DAS_3` requested normal braking for
+about 1.1 to 1.3 seconds while the host was still requesting propulsion. The
+private command replaced the factory brake request until the factory ACC
+supervisor faulted.
+
+b6j gives a current-frame factory braking request priority: whenever a valid
+stock `DAS_3` has command type 1, that complete frame is forwarded unchanged.
+Openpilot substitution resumes only after factory `DAS_3` stops requesting
+braking and every existing White Panda guard permits it. Collision/AEB
+pass-through, driver-pedal cancellation, the speed floor, freshness and
+integrity checks, steering behavior, and the 100 Nm ceiling are unchanged.
+
+This is deliberately hybrid longitudinal control. It is intended to preserve
+factory-supervised braking while openpilot supplies permitted propulsion; it
+does not provide full openpilot-controlled braking.
 
 ## b6i local validation on 2026-07-31
 
