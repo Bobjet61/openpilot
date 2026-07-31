@@ -30,6 +30,18 @@ int main(void) {
   assert(!chrysler_long_counters_aligned(true, 3, true, 2, true, 3));
   assert(!chrysler_long_counters_aligned(true, 3, false, 3, true, 3));
 
+  // A new private cycle is committed only after all three valid frames carry
+  // the same counter. The first two arrivals must leave the prior command in
+  // force rather than briefly passing a factory command through.
+  assert(!chrysler_long_staged_cycle_ready(
+    true, 4, true, 3, true, 3));
+  assert(!chrysler_long_staged_cycle_ready(
+    true, 4, true, 4, true, 3));
+  assert(chrysler_long_staged_cycle_ready(
+    true, 4, true, 4, true, 4));
+  assert(!chrysler_long_staged_cycle_ready(
+    true, 4, true, 4, false, 4));
+
   assert(valid_brake_command());
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_MIN_RAW,

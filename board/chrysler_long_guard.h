@@ -20,6 +20,16 @@
 #define CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US 100000U
 
+// The FCA DAS_3 source is isolated on physical White Panda CAN2, which the
+// firmware numbers as bus 1. Only a fresh, integrity-checked stock DAS_3 from
+// that bus may select normal LKAS steering. APA is deliberately never selected
+// by this guard.
+#define CHRYSLER_STEER_STOCK_BUS 1
+#define CHRYSLER_STEER_MODE_LKAS 1
+#define CHRYSLER_STEER_MODE_APA 2
+#define CHRYSLER_STEER_MODE_DISABLED 3
+#define CHRYSLER_STEER_STOCK_TIMEOUT_US CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US
+
 // ACC_DECEL_CMD: raw * 0.004885 - 16 m/s^2.
 #define CHRYSLER_LONG_DECEL_MIN_RAW 2661  // -3.001015 m/s^2, stock p01
 #define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
@@ -74,12 +84,55 @@ static inline bool chrysler_long_counter_step_valid(bool *seen, int *last,
   return valid;
 }
 
+static inline int chrysler_steer_mode_from_stock_das3(
+    const int source_bus,
+    const uint32_t now,
+    const uint32_t last,
+    const bool frame_valid,
+    const bool acc_available) {
+  const bool valid_can2_source = source_bus == CHRYSLER_STEER_STOCK_BUS;
+  const bool fresh = chrysler_long_is_fresh(
+    now, last, frame_valid, CHRYSLER_STEER_STOCK_TIMEOUT_US);
+
+  return (valid_can2_source && fresh && acc_available) ?
+    CHRYSLER_STEER_MODE_LKAS : CHRYSLER_STEER_MODE_DISABLED;
+}
+
+static inline bool chrysler_steer_stock_das3_integrity_valid(
+    const int source_bus,
+    const int length,
+    const bool checksum_valid,
+    const bool counter_valid) {
+  return (source_bus == CHRYSLER_STEER_STOCK_BUS) &&
+         (length == 8) && checksum_valid && counter_valid;
+}
+
+// Full-long keeps factory ACC-main availability as an independent permission.
+// Steering-wheel button traffic must therefore remain bit-for-bit unchanged;
+// synthesizing ACC-off here removes that permission and forces wrongCarMode.
+static inline uint32_t chrysler_long_wheel_button_passthrough(
+    const uint32_t word) {
+  return word;
+}
+
 static inline bool chrysler_long_counters_aligned(
     const bool brake_seen, const int brake_counter,
     const bool dash_seen, const int dash_counter,
     const bool torque_seen, const int torque_counter) {
   return brake_seen && dash_seen && torque_seen &&
          (brake_counter == dash_counter) && (dash_counter == torque_counter);
+}
+
+// The three private messages form one logical command. A partial next cycle
+// must never replace or invalidate the last complete cycle simply because CAN
+// arbitration delivered its brake, dash, and torque frames one at a time.
+static inline bool chrysler_long_staged_cycle_ready(
+    const bool brake_valid, const int brake_counter,
+    const bool dash_valid, const int dash_counter,
+    const bool torque_valid, const int torque_counter) {
+  return brake_valid && dash_valid && torque_valid &&
+         (brake_counter == dash_counter) &&
+         (dash_counter == torque_counter);
 }
 
 static inline bool chrysler_long_commands_valid(
