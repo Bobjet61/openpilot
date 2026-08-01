@@ -23,17 +23,20 @@ WP_LONG_DIAGNOSTIC_FAILURES = {
 }
 
 
-# Independent host-to-Panda transport gate.
-JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
+# b6k recovery build: factory ACC owns longitudinal control. Do not send the
+# private White Panda command transport, expose Experimental Mode, or request
+# longitudinal actuation. The response-5 steering and lateral tune are
+# independent of these gates and remain unchanged.
+JEEP_LONG_SHADOW_TRANSPORT_COMPILED = False
 
 # Tags Panda-rejected private frames in their USB rejection receipts. The tag
 # never reaches a vehicle CAN transmit queue and does not change acceptance.
-JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = True
+JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = False
 
 # Independent actuation gate. The embedded Panda and the external White Panda
 # each retain an independent fail-closed gate and validate the complete command
 # envelope before vehicle CAN is modified.
-JEEP_LONG_ACTUATION_COMPILED = True
+JEEP_LONG_ACTUATION_COMPILED = False
 
 if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
   raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
