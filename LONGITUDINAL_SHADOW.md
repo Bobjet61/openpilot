@@ -1,12 +1,19 @@
 # Chrysler guarded longitudinal control
 
+## wp-b6k recovery configuration
+
+`wp-b6k` compiles `CHRYSLER_LONG_ACTUATION` to zero. The existing CAN2
+isolation/routing and guarded LKAS steering path remain in place, but no
+factory `DAS_3` longitudinal frame can be substituted. Factory ACC therefore
+retains propulsion and braking ownership while the recovery build is active.
+
 `wp-b6j` is the White Panda half of the Jeep moving-only longitudinal
 controller. It is derived from the Chrysler Advanced firmware and assumes the
 vehicle's factory `DAS_3` source is isolated on physical White Panda CAN2
 (firmware bus 1). Do not use this firmware on a different wiring topology.
 
-Actuation is compiled on, but every forwarded command remains behind the
-independent White Panda guard:
+In the prior `wp-b6j` build, actuation was compiled on, but every forwarded
+command remained behind the independent White Panda guard:
 
 - freshness watchdogs for private `0x1F6`, `0x1F7`, and `0x272` commands,
   wheel speed, both driver pedals, and factory ACC/AEB state;

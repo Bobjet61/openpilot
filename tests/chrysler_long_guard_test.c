@@ -11,7 +11,7 @@ static bool valid_brake_command(void) {
 
 
 int main(void) {
-  assert(CHRYSLER_LONG_ACTUATION == 1U);
+  assert(CHRYSLER_LONG_ACTUATION == 0U);
 
   // Diagnostic packing preserves the two raw factory DAS_3 words and the
   // exact output engine word in their original byte order.
@@ -26,9 +26,9 @@ int main(void) {
   assert(!chrysler_long_is_fresh(1000000U, 950000U, false, 100000U));
   assert(chrysler_long_is_fresh(50U, 0xFFFFFFF0U, true, 100U));
 
-  // Reproduce the b6i fault arbitration: openpilot may substitute a normal
-  // propulsion frame, but the same-frame factory brake request must win.
-  assert(chrysler_long_should_substitute_das3(true, false, 0));
+  // wp-b6k is compile-time recovery firmware: even an otherwise valid runtime
+  // request cannot substitute any factory DAS_3 propulsion or brake frame.
+  assert(!chrysler_long_should_substitute_das3(true, false, 0));
   assert(!chrysler_long_should_substitute_das3(true, false, 1));
   assert(!chrysler_long_should_substitute_das3(true, true, 2));
   assert(!chrysler_long_should_substitute_das3(true, false, 7));

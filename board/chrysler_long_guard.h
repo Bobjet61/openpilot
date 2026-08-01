@@ -4,13 +4,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// b6h actuation build. This remains source-controlled and cannot be enabled or
-// altered with a compiler flag. Runtime output still requires every freshness,
-// integrity, pedal, collision, speed, and command-envelope check below.
+// wp-b6k recovery build. Factory ACC owns longitudinal control and every
+// intercepted factory command must pass through unchanged. This remains
+// source-controlled and cannot be enabled or altered with a compiler flag.
 #ifdef CHRYSLER_LONG_ACTUATION
 #error "CHRYSLER_LONG_ACTUATION must not be set from the build command"
 #endif
-#define CHRYSLER_LONG_ACTUATION 1U
+#define CHRYSLER_LONG_ACTUATION 0U
 
 #define CHRYSLER_LONG_BRAKE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_DASH_TIMEOUT_US 250000U
@@ -153,7 +153,8 @@ static inline bool chrysler_long_should_substitute_das3(
     const bool guard_enabled,
     const bool stock_collision,
     const int stock_command_type) {
-  return guard_enabled && !stock_collision && (stock_command_type == 0);
+  return (CHRYSLER_LONG_ACTUATION != 0U) && guard_enabled &&
+         !stock_collision && (stock_command_type == 0);
 }
 
 static inline bool chrysler_long_counters_aligned(
