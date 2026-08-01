@@ -6,6 +6,7 @@ from cereal import log, custom
 from openpilot.common.filter_simple import FirstOrderFilter
 from openpilot.common.numpy_fast import interp
 from openpilot.selfdrive.car.interfaces import LatControlInputs
+from openpilot.selfdrive.car.chrysler.jeep_bump_steer_filter import JeepBumpSteerFilter
 from openpilot.common.params import Params
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl
@@ -77,6 +78,10 @@ class LatControlTorque(LatControl):
     self.torque_from_lateral_accel = CI.torque_from_lateral_accel()
     self.use_steering_angle = self.torque_params.useSteeringAngle
     self.steering_angle_deadzone_deg = self.torque_params.steeringAngleDeadzoneDeg
+    self.jeep_bump_steer_filter = (
+      JeepBumpSteerFilter()
+      if CP.carFingerprint == "JEEP_GRAND_CHEROKEE" else None
+    )
     self._pid_long_sp = custom.ControlsStateSP.LateralTorqueState.new_message()
 
     self.param_s = Params()
@@ -160,6 +165,8 @@ class LatControlTorque(LatControl):
     if not active:
       output_torque = 0.0
       pid_log.active = False
+      if self.jeep_bump_steer_filter is not None:
+        self.jeep_bump_steer_filter.reset()
     else:
       actual_curvature_vm = -VM.calc_curvature(math.radians(CS.steeringAngleDeg - params.angleOffsetDeg), CS.vEgo, params.roll)
       roll_compensation = params.roll * ACCELERATION_DUE_TO_GRAVITY
@@ -179,6 +186,18 @@ class LatControlTorque(LatControl):
       # desired rate is the desired rate of change in the setpoint, not the absolute desired curvature
       # desired_lateral_jerk = desired_curvature_rate * CS.vEgo ** 2
       actual_lateral_accel = actual_curvature * CS.vEgo ** 2
+      if self.jeep_bump_steer_filter is not None:
+        vertical_accel = float("nan")
+        if len(llk.accelerationCalibrated.value) >= 3:
+          vertical_accel = float(llk.accelerationCalibrated.value[2])
+        actual_lateral_accel = self.jeep_bump_steer_filter.update(
+          raw_lateral_accel=actual_lateral_accel,
+          vertical_accel=vertical_accel,
+          speed_mps=CS.vEgo,
+          controls_active=active,
+          steering_pressed=CS.steeringPressed,
+        )
+        actual_curvature = actual_lateral_accel / max(CS.vEgo ** 2, 0.1)
       lateral_accel_deadzone = curvature_deadzone * CS.vEgo ** 2
 
       low_speed_factor = interp(CS.vEgo, LOW_SPEED_X, LOW_SPEED_Y if not self.use_nn else LOW_SPEED_Y_NN)**2
