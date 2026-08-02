@@ -603,7 +603,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     )
     self.assertEqual(
       self._tx_private_cycle(
-        15, 20_000, torque_raw=2400, engine_request=True,
+        15, 20_000, torque_raw=3700, engine_request=True,
       ),
       (True, True, True),
     )
@@ -722,7 +722,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
   def test_private_torque_payload_and_exclusivity(self):
     invalid_torque = (
       self._private_torque_msg(
-        0, torque_raw=2401, engine_request=True,
+        0, torque_raw=3701, engine_request=True,
       ),
       self._private_torque_msg(
         0, torque_raw=2001, engine_request=False,
