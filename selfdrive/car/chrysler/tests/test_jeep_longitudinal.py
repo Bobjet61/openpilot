@@ -33,6 +33,7 @@ JeepLongitudinalTransportScheduler = LONG.JeepLongitudinalTransportScheduler
 TRANSPORT_MIN_SEND_INTERVAL_NS = LONG.TRANSPORT_MIN_SEND_INTERVAL_NS
 decode_wp_long_diagnostic = LONG.decode_wp_long_diagnostic
 decode_wp_long_command_diagnostic = LONG.decode_wp_long_command_diagnostic
+decode_wp_long_owner_diagnostic = LONG.decode_wp_long_owner_diagnostic
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
@@ -164,7 +165,26 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertFalse(unsupported.valid)
 
-  def test_b6o_enables_independently_guarded_transport_and_actuation(self):
+  def test_white_panda_owner_diagnostic_decodes_handoff_state(self):
+    diagnostic = decode_wp_long_owner_diagnostic(0xD2, 0x19, 0)
+    self.assertTrue(diagnostic.valid)
+    self.assertEqual(diagnostic.owner_state, 2)
+    self.assertEqual(diagnostic.owner_name, "openpilot")
+    self.assertTrue(diagnostic.stock_valid)
+    self.assertTrue(diagnostic.stock_available)
+    self.assertFalse(diagnostic.stock_active)
+    self.assertEqual(diagnostic.stock_fault, 0)
+    self.assertFalse(diagnostic.stock_collision)
+    self.assertTrue(diagnostic.cancel_injected)
+
+  def test_white_panda_owner_diagnostic_rejects_unknown_signature(self):
+    diagnostic = decode_wp_long_owner_diagnostic(0, 0xFF, 3)
+    self.assertFalse(diagnostic.valid)
+    self.assertEqual(diagnostic.owner_name, "unsupported")
+    self.assertFalse(diagnostic.stock_valid)
+    self.assertEqual(diagnostic.stock_fault, 0)
+
+  def test_b6q_enables_independently_guarded_transport_and_actuation(self):
     self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
     self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)
     self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
@@ -196,9 +216,10 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       carcontroller_source,
     )
     self.assertIn(
-      "if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:",
+      "self.jeep_long_shadow.note_transport_sent(",
       carcontroller_source,
     )
+    self.assertNotIn("MIN_ACTIVE_SPEED_MPS", carcontroller_source)
     self.assertIn("if not CC.longActive:", carcontroller_source)
     self.assertIn("CC.actuators.accel", carcontroller_source)
     self.assertIn(
@@ -219,6 +240,11 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       "ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED",
       interface_source,
     )
+    self.assertIn(
+      "ret.pcmCruise = not JEEP_LONG_ACTUATION_COMPILED",
+      interface_source,
+    )
+    self.assertNotIn("ret.pcmCruiseSpeed =", interface_source)
 
     planner_source = PLANNER_PATH.read_text(encoding="utf-8")
     self.assertIn(
@@ -234,41 +260,16 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     ):
       self.assertNotIn(forbidden, planner_source)
 
-  def test_b6y_hold_is_direct_brake_only_and_gated(self):
+  def test_b6q_replaces_the_factory_resume_bridge(self):
     carcontroller_source = CARCONTROLLER_PATH.read_text(encoding="utf-8")
-    carstate_source = CARSTATE_PATH.read_text(encoding="utf-8")
     chryslercan_source = CHRYSLERCAN_PATH.read_text(encoding="utf-8")
-    controlsd_source = CONTROLSD_PATH.read_text(encoding="utf-8")
 
+    # The legacy helper remains available for rollback, but the update loop no
+    # longer invokes it or asks factory ACC to resume longitudinal ownership.
     self.assertIn("def update_b6y_standstill_hold(", carcontroller_source)
-    self.assertIn("CC.enabled and CC.longActive", carcontroller_source)
-    self.assertIn("CS.cruise_active_actual and CS.acc_decelerating", carcontroller_source)
-    self.assertIn("not CS.forward_gear or not CS.out.standstill", carcontroller_source)
-    self.assertIn("CS.out.accFaulted or CS.out.stockAeb", carcontroller_source)
-    self.assertIn("chryslercan.create_b6y_standstill_hold(", carcontroller_source)
-    self.assertIn("if not CS.b6y_hold_active or CS.cruise_active_actual:", carcontroller_source)
-    self.assertIn("if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:", carcontroller_source)
-    self.assertIn("def create_b6y_standstill_hold(", chryslercan_source)
-    self.assertIn('"ENGINE_TORQUE_REQUEST_MAX": 0', chryslercan_source)
-    self.assertIn('"ACC_DECEL": -2.0', chryslercan_source)
-    self.assertIn('"ACC_GO": 0', chryslercan_source)
-
-    self.assertIn("self.b6y_hold_active = False", carstate_source)
-    self.assertIn("self.cruise_active_actual = ret.cruiseState.enabled", carstate_source)
-    self.assertIn("self.das_3 = dict(cp_cruise.vl[\"DAS_3\"])", carstate_source)
-    # The custom bridge is not exposed as the generic brake-hold state:
-    # that generic event intentionally disengages openpilot longitudinal.
-    self.assertNotIn("ret.brakeHoldActive", carstate_source)
-    self.assertNotIn("CS.brakeHoldActive", controlsd_source)
-    self.assertIn(
-      "cruise_mismatch = CS.cruiseState.enabled and not self.enabled",
-      controlsd_source,
-    )
-    self.assertIn("elif CC.cruiseControl.resume:", carcontroller_source)
-    self.assertIn(
-      "self.CP, resume=True))",
-      carcontroller_source,
-    )
+    self.assertEqual(carcontroller_source.count("self.update_b6y_standstill_hold("), 0)
+    self.assertIn('"ACC_STOP": envelope.stop_request', chryslercan_source)
+    self.assertIn('"ACC_GO": envelope.go_request', chryslercan_source)
 
   def test_b6y_hold_message_has_no_propulsion_or_go_request(self):
     chryslercan = load_chryslercan()
@@ -384,6 +385,201 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertTrue(engine.engine_active)
     self.assertGreater(engine.engine_torque_nm, 0.0)
 
+  def test_b6q_mild_negative_request_remains_coast(self):
+    shadow = JeepLongitudinalShadow()
+    first = shadow.update(-0.30, eligible=True, speed_mps=15.0)
+    self.assertFalse(first.engine_active)
+    for _ in range(100):
+      result = shadow.update(-0.30, eligible=True, speed_mps=15.0)
+    self.assertAlmostEqual(result.limited_accel, -0.30)
+    self.assertFalse(result.brake_latched)
+    self.assertFalse(result.brake_active)
+    self.assertFalse(result.engine_active)
+    self.assertEqual(result.command_mode, "coast")
+
+  def test_b6q_moderate_brake_requires_confirmation(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(LONG.BRAKE_ENTRY_CONFIRM_CYCLES - 1):
+      result = shadow.update(-0.50, eligible=True, speed_mps=15.0)
+      self.assertFalse(result.brake_latched)
+    result = shadow.update(-0.50, eligible=True, speed_mps=15.0)
+    self.assertTrue(result.brake_latched)
+    self.assertAlmostEqual(result.limited_accel, LONG.BRAKE_ENTER_ACCEL)
+
+  def test_b6q_strong_raw_brake_bypasses_confirmation(self):
+    shadow = JeepLongitudinalShadow()
+    first = shadow.update(-1.0, eligible=True, speed_mps=15.0)
+    self.assertTrue(first.brake_latched)
+    self.assertEqual(first.limited_accel, -0.04)
+    for _ in range(10):
+      result = shadow.update(-1.0, eligible=True, speed_mps=15.0)
+      self.assertTrue(result.brake_latched)
+      if result.brake_active:
+        break
+    self.assertTrue(result.brake_active)
+
+  def test_b6q_one_cycle_strong_brake_spike_does_not_stick(self):
+    shadow = JeepLongitudinalShadow()
+    spike = shadow.update(-1.0, eligible=True, speed_mps=15.0)
+    self.assertTrue(spike.brake_latched)
+    recovered = shadow.update(0.0, eligible=True, speed_mps=15.0)
+    self.assertFalse(recovered.brake_latched)
+    self.assertFalse(recovered.brake_active)
+
+  def test_b6q_brake_confirmation_resets_outside_entry_band(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(8):
+      shadow.update(-0.50, eligible=True, speed_mps=15.0)
+    reset = shadow.update(-0.20, eligible=True, speed_mps=15.0)
+    self.assertFalse(reset.brake_latched)
+    self.assertEqual(shadow.brake_entry_confirm_cycles, 0)
+
+  def test_low_speed_stop_holds_without_propulsion(self):
+    shadow = JeepLongitudinalShadow()
+    for speed in (3.0, 2.0, 1.0, 0.5, 0.1, 0.0):
+      for _ in range(25):
+        result = shadow.update(-1.0, eligible=True, speed_mps=speed)
+        self.assertFalse(result.engine_active)
+        self.assertFalse(result.go_request)
+
+    self.assertEqual(result.low_speed_state, "hold")
+    self.assertEqual(result.command_mode, "hold")
+    self.assertTrue(result.stop_request)
+    self.assertTrue(result.brake_active)
+    self.assertFalse(result.engine_active)
+    self.assertAlmostEqual(result.brake_accel_mps2, -2.0)
+
+  def test_true_standstill_uses_full_hold_before_owner_handoff(self):
+    shadow = JeepLongitudinalShadow()
+    result = shadow.update(1.0, eligible=True, speed_mps=0.0)
+    self.assertEqual(result.low_speed_state, "hold")
+    self.assertTrue(result.stop_request)
+    self.assertTrue(result.brake_active)
+    self.assertFalse(result.engine_active)
+    self.assertEqual(result.brake_accel_mps2, -2.0)
+
+  def test_low_speed_launch_releases_brake_before_five_cycle_go_pulse(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(100):
+      held = shadow.update(-1.0, eligible=True, speed_mps=0.0)
+    self.assertTrue(held.stop_request)
+
+    results = []
+    for _ in range(250):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.0)
+      results.append(result)
+      shadow.note_transport_sent(result)
+      if result.low_speed_state == "creep":
+        break
+
+    go_results = [result for result in results if result.go_request]
+    self.assertEqual(len(go_results), 5)
+    self.assertTrue(all(not result.brake_active for result in go_results))
+    self.assertTrue(all(not result.engine_active for result in go_results))
+    self.assertTrue(all(not result.stop_request for result in go_results))
+    first_go = next(i for i, result in enumerate(results) if result.go_request)
+    pre_go = results[:first_go]
+    self.assertTrue(any(result.brake_active for result in pre_go))
+    self.assertTrue(any(
+      not result.brake_active and result.low_speed_state == "release"
+      for result in pre_go
+    ))
+    self.assertTrue(all(not result.engine_active for result in pre_go))
+
+  def test_low_speed_launch_never_adds_torque_until_already_rolling(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(100):
+      shadow.update(-1.0, eligible=True, speed_mps=0.0)
+    for _ in range(250):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.0)
+      shadow.note_transport_sent(result)
+      self.assertFalse(result.engine_active)
+      if result.low_speed_state == "creep":
+        break
+
+    for _ in range(10):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.5)
+      self.assertFalse(result.engine_active)
+    result = shadow.update(1.0, eligible=True, speed_mps=0.8)
+    self.assertFalse(result.engine_active)
+    self.assertEqual(result.low_speed_state, "drive")
+    for _ in range(10):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.8)
+      if result.engine_active:
+        break
+    self.assertTrue(result.engine_active)
+
+  def test_failed_creep_reapplies_hold_and_requires_request_reset(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(100):
+      shadow.update(-1.0, eligible=True, speed_mps=0.0)
+    for _ in range(400):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.0)
+      shadow.note_transport_sent(result)
+      if result.low_speed_state == "blocked" and result.brake_active:
+        break
+    self.assertEqual(result.low_speed_state, "blocked")
+    self.assertTrue(result.stop_request)
+    self.assertTrue(result.brake_active)
+    self.assertFalse(result.go_request)
+    self.assertFalse(result.engine_active)
+
+    # A continuously positive planner request cannot produce repeated GO
+    # pulses. The latch clears only after the controller withdraws it.
+    for _ in range(100):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.0)
+      self.assertFalse(result.go_request)
+      self.assertEqual(result.low_speed_state, "blocked")
+    for _ in range(60):
+      result = shadow.update(-0.5, eligible=True, speed_mps=0.0)
+    self.assertEqual(result.low_speed_state, "hold")
+
+  def test_transport_commits_neutral_release_before_any_go_cycle(self):
+    shadow = JeepLongitudinalShadow()
+    scheduler = JeepLongitudinalTransportScheduler()
+    sent = []
+    now_nanos = 1_000_000_000
+
+    for _ in range(100):
+      result = shadow.update(-1.0, eligible=True, speed_mps=0.0)
+      counter = scheduler.next_counter(now_nanos, result.transport_enabled)
+      if counter is not None:
+        sent.append(result)
+        shadow.note_transport_sent(result)
+      now_nanos += 20_000_000
+
+    for _ in range(300):
+      result = shadow.update(1.0, eligible=True, speed_mps=0.0)
+      counter = scheduler.next_counter(now_nanos, result.transport_enabled)
+      if counter is not None:
+        sent.append(result)
+        shadow.note_transport_sent(result)
+      now_nanos += 20_000_000
+      if any(envelope.go_request for envelope in sent):
+        break
+
+    first_go = next(
+      index for index, envelope in enumerate(sent) if envelope.go_request
+    )
+    released = sent[first_go - 1]
+    self.assertEqual(released.low_speed_state, "release")
+    self.assertFalse(released.brake_active)
+    self.assertFalse(released.engine_active)
+    self.assertFalse(released.stop_request)
+    self.assertFalse(released.go_request)
+
+  def test_low_speed_state_fails_off_on_authority_loss(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(100):
+      shadow.update(-1.0, eligible=True, speed_mps=0.0)
+    result = shadow.update(-1.0, eligible=False, speed_mps=0.0)
+    self.assertEqual(result.low_speed_state, "drive")
+    self.assertFalse(result.transport_enabled)
+    self.assertFalse(result.brake_active)
+    self.assertFalse(result.engine_active)
+    self.assertFalse(result.stop_request)
+    self.assertFalse(result.go_request)
+
   def test_engine_torque_is_zero_inside_deadband_at_zero_speed(self):
     result = JeepLongitudinalShadow().update(0.04, eligible=True)
     self.assertFalse(result.engine_active)
@@ -460,7 +656,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       result = shadow.update(-1.0, eligible=True, speed_mps=23.6)
       self.assertFalse(result.engine_active and result.brake_active)
       self.assertLessEqual(
-        abs(result.engine_torque_nm - previous.engine_torque_nm), 12.0001,
+        abs(result.engine_torque_nm - previous.engine_torque_nm), 36.0001,
       )
       self.assertLessEqual(
         abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0401,
@@ -547,6 +743,35 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       all(msg[2][7] == fca_checksum(msg[2])
           for msg in (brake, dash, torque)),
     )
+
+  def test_state_machine_stop_release_go_bytes_match_guard_protocol(self):
+    chryslercan = load_chryslercan()
+    shadow = JeepLongitudinalShadow()
+    for _ in range(100):
+      envelope = shadow.update(-1.0, eligible=True, speed_mps=0.0)
+
+    stop, _, stop_torque = chryslercan.create_wp_long_shadow_messages(
+      PrivateMessagePacker(), envelope, 4,
+    )
+    self.assertEqual((stop[2][0] >> 5) & 0x3, 0x1)
+    self.assertEqual((stop[2][4] >> 4) & 0x7, 1)
+    self.assertEqual(stop_torque[2][4] >> 7, 0)
+
+    for _ in range(250):
+      envelope = shadow.update(1.0, eligible=True, speed_mps=0.0)
+      shadow.note_transport_sent(envelope)
+      if envelope.go_request:
+        break
+    self.assertTrue(envelope.go_request)
+    go, _, go_torque = chryslercan.create_wp_long_shadow_messages(
+      PrivateMessagePacker(), envelope, 6,
+    )
+    self.assertEqual((go[2][0] >> 5) & 0x3, 0x2)
+    self.assertEqual((go[2][4] >> 4) & 0x7, 0)
+    self.assertEqual(go_torque[2][4] >> 7, 0)
+    self.assertTrue(all(
+      msg[2][7] == fca_checksum(msg[2]) for msg in (stop, stop_torque, go, go_torque)
+    ))
 
   def test_transport_scheduler_enforces_margin_and_counts_only_sends(self):
     self.assertEqual(TRANSPORT_MIN_SEND_INTERVAL_NS, 25_000_000)

@@ -75,10 +75,15 @@ class CarInterface(CarInterfaceBase):
         Panda.FLAG_CHRYSLER_JEEP_LONG_DIAGNOSTIC,
         Panda.FLAG_CHRYSLER_JEEP_LONG_ACTUATION,
       )
-      # b8y uses openpilot longitudinal only while the moving-only host and
-      # dual-Panda safety gates all agree.
+      # b6q owns the openpilot engagement state instead of mirroring the
+      # factory ACC_ACTIVE bit. This delays the guarded factory-CANCEL
+      # handoff until the SET/RES button release that enables openpilot, so a
+      # held button cannot race the White Panda's cancel injection. Keep the
+      # existing pcmCruiseSpeed setting to avoid sending factory speed-sync
+      # button presses while openpilot owns longitudinal control.
       ret.experimentalLongitudinalAvailable = JEEP_LONG_ACTUATION_COMPILED
       ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED
+      ret.pcmCruise = not JEEP_LONG_ACTUATION_COMPILED
 
       ret.lateralTuning.init('pid')
       # Preserve the existing tune through 20 m/s, then mildly soften the

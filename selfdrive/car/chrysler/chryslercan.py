@@ -91,18 +91,18 @@ def make_wp_private_message(packer, name, values):
 
 
 def create_wp_long_shadow_messages(packer, envelope, counter):
-  """Pack calibrated moving-only Jeep commands for the White Panda guard."""
+  """Pack calibrated single-owner Jeep commands for the White Panda guard."""
   counter %= 0x10
   brake_values = {
-    "ACC_STOP": 0,
-    "ACC_GO": 0,
+    "ACC_STOP": envelope.stop_request,
+    "ACC_GO": envelope.go_request,
     # Stock DAS_3 uses its +4.0 m/s^2 encoded maximum as the inactive
     # deceleration sentinel whenever ACC_DECEL_REQ is zero.
     "ACC_DECEL_CMD": envelope.brake_accel_mps2 if envelope.brake_active else 4.0,
     "ACC_AVAILABLE": envelope.eligible,
     "ACC_ENABLED": envelope.eligible,
-    # Stock logs show brake-prep is not a normal-braking enable bit. The
-    # initial moving-only shadow excludes brake-prep and stop/go completely.
+    # Stock logs show brake-prep is not a normal-braking enable bit. Stop and
+    # GO are explicit envelope states and never rely on brake-prep.
     "ACC_BRK_PREP": 0,
     "COMMAND_TYPE": 1 if envelope.brake_active else 0,
     "COUNTER": counter,

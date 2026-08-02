@@ -110,6 +110,8 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
       engine_torque_nm=0.0,
       eligible=True,
       host_enabled=False,
+      stop_request=False,
+      go_request=False,
     )
     _, disabled_dash, _ = chryslercan.create_wp_long_shadow_messages(
       self.packer, envelope, 0,
@@ -128,6 +130,35 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
       hypothetical_enabled_dash[2][7],
       fca_checksum(hypothetical_enabled_dash[2]),
     )
+
+  def test_single_owner_stop_and_go_pack_as_mutually_exclusive_states(self):
+    envelope = SimpleNamespace(
+      brake_accel_mps2=-2.0,
+      brake_active=True,
+      engine_active=False,
+      engine_torque_nm=0.0,
+      eligible=True,
+      host_enabled=True,
+      stop_request=True,
+      go_request=False,
+    )
+    stop, _, stop_torque = chryslercan.create_wp_long_shadow_messages(
+      self.packer, envelope, 4,
+    )
+    self.assertEqual((stop[2][0] >> 5) & 0x3, 0x1)
+    self.assertEqual((stop[2][4] >> 4) & 0x7, 1)
+    self.assertEqual(stop_torque[2][4] >> 7, 0)
+
+    envelope.brake_accel_mps2 = 0.0
+    envelope.brake_active = False
+    envelope.stop_request = False
+    envelope.go_request = True
+    go, _, go_torque = chryslercan.create_wp_long_shadow_messages(
+      self.packer, envelope, 5,
+    )
+    self.assertEqual((go[2][0] >> 5) & 0x3, 0x2)
+    self.assertEqual((go[2][4] >> 4) & 0x7, 0)
+    self.assertEqual(go_torque[2][4] >> 7, 0)
 
   def test_transport_probe_is_strictly_neutral(self):
     brake, dash, torque = chryslercan.create_wp_long_transport_messages(

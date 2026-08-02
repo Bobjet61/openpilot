@@ -22,9 +22,17 @@ WP_LONG_DIAGNOSTIC_FAILURES = {
   14: "collision",
   15: "command_envelope",
 }
+WP_LONG_OWNER_SIGNATURE = 0xD0
+WP_LONG_OWNER_SIGNATURE_MASK = 0xF0
+WP_LONG_OWNER_STATES = {
+  0: "off",
+  1: "canceling",
+  2: "openpilot",
+  3: "failed",
+}
 
 
-# b6o blended actuation build. Runtime output still requires the host,
+# b6q single-owner stop/go actuation build. Runtime output still requires the host,
 # embedded Panda, and external White Panda to independently accept the same
 # fresh, counter-matched, pedal-free, collision-free command cycle.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
@@ -57,10 +65,19 @@ COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
 
-# Match the White Panda's moving-only gate (raw wheel speed 29, approximately
-# 2.06 m/s). This generator never commands stop, go, or brake preparation;
-# the separately guarded b6y standstill bridge remains independent.
-MIN_ACTIVE_SPEED_MPS = 2.1
+# The factory two-sided capture established the low-speed sequence used here:
+# braking continues through zero, the stopped state holds -2.0 m/s^2, brake
+# release completes before a short GO pulse, and engine torque does not begin
+# until the Jeep is already rolling. A failed launch attempt re-applies hold
+# and will not retry until the controller first withdraws the launch request.
+LOW_SPEED_HOLD_ENTRY_MPS = 0.15
+LOW_SPEED_ENGINE_MIN_MPS = 0.78
+LOW_SPEED_HOLD_ACCEL_MPS2 = -2.0
+LOW_SPEED_LAUNCH_REQUEST_ACCEL = 0.10
+LOW_SPEED_LAUNCH_RESET_ACCEL = 0.02
+LOW_SPEED_LAUNCH_CONFIRM_CYCLES = 10  # 200 ms at the 50 Hz envelope update
+LOW_SPEED_GO_PULSE_CYCLES = 5         # 100 ms, matching the OEM capture
+LOW_SPEED_CREEP_TIMEOUT_CYCLES = 50   # 1.0 s; never add torque from standstill
 
 # The embedded Panda rejects private cycles closer than 15 ms. Even a 20 ms
 # sender interval occasionally arrived below that threshold after USB/CAN
@@ -86,19 +103,27 @@ ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
 # Panda guards at 425 Nm, below the unrelated 547 Nm factory outlier.
 ENGINE_TORQUE_MAX_NM = 425.0
 
-# b6n switched directly from substantial speed-feed-forward torque to braking
-# whenever requested acceleration crossed -0.05 m/s^2. The recorded b6n route
-# repeated that transition 34 times in 502 seconds, including 224 Nm -> brake
-# -> 224 Nm cycles at freeway speed. b6o fades propulsion through a coast band,
-# latches braking only after a meaningful deceleration request, and requires
-# one actuator to reach zero before enabling the other.
-TORQUE_BLEND_ZERO_ACCEL = -0.20
+# b6p's failed route proved that the zero-before-opposite-actuator interlock
+# prevents direct overlap, but a narrow decision band still allowed slower
+# brake -> coast -> engine cycles. b6q removes propulsion by -0.05 m/s^2,
+# treats ordinary negative corrections through -0.40 m/s^2 as coast, and
+# requires a moderate braking request to persist for 200 ms. A strong raw
+# request bypasses that confirmation so urgent braking is never delayed by the
+# mapper's input jerk limiter.
+TORQUE_BLEND_ZERO_ACCEL = -0.05
 TORQUE_BLEND_FULL_ACCEL = 0.0
-BRAKE_ENTER_ACCEL = -0.20
+BRAKE_ENTER_ACCEL = -0.40
+BRAKE_IMMEDIATE_ACCEL = -0.75
+BRAKE_ENTRY_CONFIRM_CYCLES = 10
 BRAKE_EXIT_ACCEL = -0.08
-BRAKE_BLEND_FULL_ACCEL = -0.50
+BRAKE_BLEND_FULL_ACCEL = -0.80
 ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
+# A confirmed brake request must retire even the 425 Nm ceiling before the
+# coast interlock can admit braking. The faster brake-transition release is
+# only a withdrawal of requested engine torque; propulsion increases retain
+# the ordinary 300 Nm/s limit and normal coasting retains 600 Nm/s.
+BRAKE_TRANSITION_TORQUE_RATE_DOWN_NM_PER_S = 1800.0
 BRAKE_APPLY_RATE_MPS3 = 1.5
 BRAKE_RELEASE_RATE_MPS3 = 2.0
 ENGINE_TORQUE_ZERO_EPSILON_NM = 0.5
@@ -141,6 +166,9 @@ class JeepLongitudinalEnvelope:
   engine_torque_nm: float
   command_mode: str
   brake_latched: bool
+  stop_request: bool
+  go_request: bool
+  low_speed_state: str
   transport_enabled: bool
   host_enabled: bool
   eligible: bool
@@ -170,6 +198,19 @@ class JeepLongitudinalCommandDiagnostic:
   stock_acc_available: bool
   stock_acc_active: bool
   stock_accel_mps2: float
+
+
+@dataclass(frozen=True)
+class JeepLongitudinalOwnerDiagnostic:
+  valid: bool
+  owner_state: int
+  owner_name: str
+  stock_valid: bool
+  stock_available: bool
+  stock_active: bool
+  stock_fault: int
+  stock_collision: bool
+  cancel_injected: bool
 
 
 def decode_wp_long_diagnostic(
@@ -226,6 +267,33 @@ def decode_wp_long_command_diagnostic(
   )
 
 
+def decode_wp_long_owner_diagnostic(
+    owner_status: int,
+    stock_status: int,
+    stock_fault_byte: int,
+) -> JeepLongitudinalOwnerDiagnostic:
+  owner_status &= 0xFF
+  stock_status &= 0xFF
+  owner_state = owner_status & 0xF
+  valid = (
+    owner_status & WP_LONG_OWNER_SIGNATURE_MASK
+  ) == WP_LONG_OWNER_SIGNATURE
+  return JeepLongitudinalOwnerDiagnostic(
+    valid=valid,
+    owner_state=owner_state if valid else 0,
+    owner_name=(
+      WP_LONG_OWNER_STATES.get(owner_state, "unknown")
+      if valid else "unsupported"
+    ),
+    stock_valid=valid and bool(stock_status & (1 << 4)),
+    stock_available=valid and bool(stock_status & (1 << 0)),
+    stock_active=valid and bool(stock_status & (1 << 1)),
+    stock_fault=(stock_fault_byte & 0x3) if valid else 0,
+    stock_collision=valid and bool(stock_status & (1 << 2)),
+    cancel_injected=valid and bool(stock_status & (1 << 3)),
+  )
+
+
 def clip(value: float, lower: float, upper: float) -> float:
   return min(max(value, lower), upper)
 
@@ -265,8 +333,15 @@ class JeepLongitudinalShadow:
     self.engine_torque_last_nm = 0.0
     self.brake_accel_last_mps2 = 0.0
     self.brake_latched = False
+    self.brake_immediate = False
+    self.brake_entry_confirm_cycles = 0
     self.last_nonzero_mode = "coast"
     self.coast_interlock_remaining = 0
+    self.low_speed_state = "drive"
+    self.launch_confirm_cycles = 0
+    self.release_transport_confirmed = False
+    self.go_pulse_remaining = 0
+    self.creep_wait_remaining = 0
 
   def update(
       self,
@@ -285,8 +360,15 @@ class JeepLongitudinalShadow:
       self.engine_torque_last_nm = 0.0
       self.brake_accel_last_mps2 = 0.0
       self.brake_latched = False
+      self.brake_immediate = False
+      self.brake_entry_confirm_cycles = 0
       self.last_nonzero_mode = "coast"
       self.coast_interlock_remaining = 0
+      self.low_speed_state = "drive"
+      self.launch_confirm_cycles = 0
+      self.release_transport_confirmed = False
+      self.go_pulse_remaining = 0
+      self.creep_wait_remaining = 0
     else:
       lower = self.accel_last - JERK_DOWN * COMMAND_DT
       upper = self.accel_last + JERK_UP * COMMAND_DT
@@ -295,10 +377,62 @@ class JeepLongitudinalShadow:
     self.accel_last = limited_accel
     if eligible:
       if self.brake_latched:
-        if limited_accel >= BRAKE_EXIT_ACCEL:
+        self.brake_entry_confirm_cycles = 0
+        if (
+            limited_accel >= BRAKE_EXIT_ACCEL
+            and requested_accel > BRAKE_ENTER_ACCEL
+        ):
           self.brake_latched = False
-      elif limited_accel <= BRAKE_ENTER_ACCEL:
+          self.brake_immediate = False
+      elif requested_accel <= BRAKE_IMMEDIATE_ACCEL:
+        self.brake_entry_confirm_cycles = 0
         self.brake_latched = True
+        self.brake_immediate = True
+      elif requested_accel <= BRAKE_ENTER_ACCEL:
+        self.brake_entry_confirm_cycles += 1
+        if self.brake_entry_confirm_cycles >= BRAKE_ENTRY_CONFIRM_CYCLES:
+          self.brake_entry_confirm_cycles = 0
+          self.brake_latched = True
+          self.brake_immediate = False
+      else:
+        self.brake_entry_confirm_cycles = 0
+
+    # Enter the bounded low-speed state machine only after a braking stop or
+    # when controls are first enabled at true standstill. Merely creeping
+    # slowly with a positive request must not create an unsolicited hold.
+    stopped = speed_mps <= 0.001
+    stop_entry = (
+      speed_mps <= LOW_SPEED_HOLD_ENTRY_MPS
+      and (
+        stopped
+        or self.brake_latched
+        or self.brake_accel_last_mps2 < -BRAKE_ZERO_EPSILON_MPS2
+      )
+    )
+    if eligible and self.low_speed_state == "drive" and stop_entry:
+      self.low_speed_state = "hold"
+      self.launch_confirm_cycles = 0
+      self.release_transport_confirmed = False
+
+    if eligible and self.low_speed_state == "hold":
+      if limited_accel >= LOW_SPEED_LAUNCH_REQUEST_ACCEL:
+        self.launch_confirm_cycles += 1
+      else:
+        self.launch_confirm_cycles = 0
+      if self.launch_confirm_cycles >= LOW_SPEED_LAUNCH_CONFIRM_CYCLES:
+        self.low_speed_state = "release"
+    elif eligible and self.low_speed_state in ("release", "go", "creep"):
+      if limited_accel <= LOW_SPEED_LAUNCH_RESET_ACCEL:
+        self.low_speed_state = "hold"
+        self.launch_confirm_cycles = 0
+        self.release_transport_confirmed = False
+        self.go_pulse_remaining = 0
+        self.creep_wait_remaining = 0
+    elif eligible and self.low_speed_state == "blocked":
+      if limited_accel <= LOW_SPEED_LAUNCH_RESET_ACCEL:
+        self.low_speed_state = "hold"
+        self.launch_confirm_cycles = 0
+        self.release_transport_confirmed = False
 
     calibration_speed_mps = clip(
       speed_mps, 0.0, ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS,
@@ -312,8 +446,13 @@ class JeepLongitudinalShadow:
         0.0,
         ENGINE_TORQUE_MAX_NM,
       )
+      # The input slew limiter must never create or sustain propulsion after
+      # the production controller has already requested deceleration. Use the
+      # more conservative of raw and limited acceleration for the propulsion
+      # blend; the 600 Nm/s output release still smooths an existing request.
+      torque_blend_accel = min(limited_accel, requested_accel)
       torque_blend = clip(
-        (limited_accel - TORQUE_BLEND_ZERO_ACCEL)
+        (torque_blend_accel - TORQUE_BLEND_ZERO_ACCEL)
         / (TORQUE_BLEND_FULL_ACCEL - TORQUE_BLEND_ZERO_ACCEL),
         0.0,
         1.0,
@@ -322,13 +461,19 @@ class JeepLongitudinalShadow:
 
     desired_brake_accel_mps2 = 0.0
     if eligible and self.brake_latched:
+      # A strong request bypasses only the duplicate input jerk limiter. The
+      # engine/brake interlock and physical brake slew limit still apply.
+      brake_control_accel = (
+        min(limited_accel, requested_accel)
+        if self.brake_immediate else limited_accel
+      )
       calibrated_brake_accel_mps2 = clip(
-        BRAKE_ACCEL_INTERCEPT_MPS2 + BRAKE_ACCEL_GAIN * limited_accel,
+        BRAKE_ACCEL_INTERCEPT_MPS2 + BRAKE_ACCEL_GAIN * brake_control_accel,
         ACCEL_MIN,
         0.0,
       )
       brake_blend = clip(
-        (BRAKE_EXIT_ACCEL - limited_accel)
+        (BRAKE_EXIT_ACCEL - brake_control_accel)
         / (BRAKE_EXIT_ACCEL - BRAKE_BLEND_FULL_ACCEL),
         0.0,
         1.0,
@@ -336,6 +481,22 @@ class JeepLongitudinalShadow:
       desired_brake_accel_mps2 = (
         calibrated_brake_accel_mps2 * brake_blend
       )
+
+    # Low-speed overrides are deliberately asymmetric: braking is allowed all
+    # the way to zero, while propulsion remains impossible until wheel speed
+    # independently proves that the Jeep is already rolling.
+    if eligible and self.low_speed_state in ("hold", "blocked"):
+      desired_engine_torque_nm = 0.0
+      desired_brake_accel_mps2 = LOW_SPEED_HOLD_ACCEL_MPS2
+      self.brake_latched = True
+      self.brake_immediate = False
+    elif eligible and self.low_speed_state in ("release", "go", "creep"):
+      desired_engine_torque_nm = 0.0
+      desired_brake_accel_mps2 = 0.0
+      self.brake_latched = False
+      self.brake_immediate = False
+    elif eligible and speed_mps < LOW_SPEED_ENGINE_MIN_MPS:
+      desired_engine_torque_nm = 0.0
 
     if not eligible:
       engine_torque_nm = 0.0
@@ -345,7 +506,7 @@ class JeepLongitudinalShadow:
         self.engine_torque_last_nm,
         0.0,
         ENGINE_TORQUE_RATE_UP_NM_PER_S,
-        ENGINE_TORQUE_RATE_DOWN_NM_PER_S,
+        BRAKE_TRANSITION_TORQUE_RATE_DOWN_NM_PER_S,
       )
       if engine_torque_nm <= ENGINE_TORQUE_ZERO_EPSILON_NM:
         engine_torque_nm = 0.0
@@ -405,10 +566,60 @@ class JeepLongitudinalShadow:
     self.brake_accel_last_mps2 = brake_accel_mps2
     brake_active = brake_accel_mps2 < 0.0
     engine_active = engine_torque_nm > 0.0
+
+    # A GO pulse cannot overlap any residual brake request. After the captured
+    # 100 ms pulse, wait for vehicle creep. If rolling speed is not established
+    # within one second, reapply hold and latch the attempt blocked.
+    go_request = False
+    if eligible and self.low_speed_state == "release":
+      if brake_active:
+        self.release_transport_confirmed = False
+      elif self.release_transport_confirmed:
+        self.low_speed_state = "go"
+        self.release_transport_confirmed = False
+        self.go_pulse_remaining = LOW_SPEED_GO_PULSE_CYCLES
+    if eligible and self.low_speed_state == "go":
+      if brake_active:
+        self.low_speed_state = "hold"
+        self.go_pulse_remaining = 0
+      else:
+        go_request = self.go_pulse_remaining > 0
+        self.go_pulse_remaining = max(0, self.go_pulse_remaining - 1)
+        if self.go_pulse_remaining == 0:
+          self.low_speed_state = "creep"
+          self.creep_wait_remaining = LOW_SPEED_CREEP_TIMEOUT_CYCLES
+    elif eligible and self.low_speed_state == "creep":
+      if speed_mps >= LOW_SPEED_ENGINE_MIN_MPS:
+        self.low_speed_state = "drive"
+        self.creep_wait_remaining = 0
+      else:
+        self.creep_wait_remaining = max(0, self.creep_wait_remaining - 1)
+        if self.creep_wait_remaining == 0:
+          self.low_speed_state = "blocked"
+
+    # The single-owner handoff must never replace a factory standstill hold
+    # with a slowly ramping brake request. At independently measured true
+    # standstill (and after a failed creep attempt), use the exact captured OEM
+    # -2.0 m/s^2 hold immediately. Braking while the Jeep is still moving keeps
+    # the normal slew limits above.
+    if (
+        eligible
+        and stopped
+        and self.low_speed_state in ("hold", "blocked")
+    ):
+      engine_torque_nm = 0.0
+      brake_accel_mps2 = LOW_SPEED_HOLD_ACCEL_MPS2
+      self.engine_torque_last_nm = engine_torque_nm
+      self.brake_accel_last_mps2 = brake_accel_mps2
+      brake_active = True
+      engine_active = False
+
     if brake_active and engine_active:
       raise RuntimeError("Jeep longitudinal torque/brake interlock violated")
     command_mode = (
-      "brake" if brake_active else "engine" if engine_active
+      "hold" if self.low_speed_state in ("hold", "blocked") and brake_active
+      else "go" if go_request
+      else "brake" if brake_active else "engine" if engine_active
       else "coast" if eligible else "inactive"
     )
     if engine_active:
@@ -428,10 +639,30 @@ class JeepLongitudinalShadow:
       engine_torque_nm=engine_torque_nm,
       command_mode=command_mode,
       brake_latched=self.brake_latched,
+      stop_request=(
+        eligible
+        and self.low_speed_state in ("hold", "blocked")
+        and brake_active
+      ),
+      go_request=eligible and go_request and not brake_active and not engine_active,
+      low_speed_state=self.low_speed_state,
       transport_enabled=transport_enabled,
       host_enabled=JEEP_LONG_ACTUATION_COMPILED and transport_enabled,
       eligible=eligible,
     )
+
+  def note_transport_sent(self, envelope: JeepLongitudinalEnvelope) -> None:
+    """Confirm that the Pandas received a complete neutral release cycle."""
+    if (
+        self.low_speed_state == "release"
+        and envelope.low_speed_state == "release"
+        and envelope.eligible
+        and not envelope.brake_active
+        and not envelope.engine_active
+        and not envelope.stop_request
+        and not envelope.go_request
+    ):
+      self.release_transport_confirmed = True
 
 
 class JeepLongitudinalTransportScheduler:

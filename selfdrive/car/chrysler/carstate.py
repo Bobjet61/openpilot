@@ -11,6 +11,7 @@ from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import (
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   decode_wp_long_command_diagnostic,
   decode_wp_long_diagnostic,
+  decode_wp_long_owner_diagnostic,
 )
 from openpilot.selfdrive.car.chrysler.values import (
   BUTTON_STATES,
@@ -46,6 +47,7 @@ class CarState(CarStateBase):
     self.das_3 = {}
     self.wp_long_diagnostic = None
     self.wp_long_command_diagnostic = None
+    self.wp_long_owner_diagnostic = None
 
     self.lkas_enabled = False
     self.prev_lkas_enabled = False
@@ -175,6 +177,12 @@ class CarState(CarStateBase):
         int(wp_command_diag["STOCK_ACC_ACTIVE"]),
         float(wp_command_diag["STOCK_ACC_DECEL"]),
       )
+      wp_owner_diag = cp.vl["WP_LONG_OWNER_DIAGNOSTIC"]
+      self.wp_long_owner_diagnostic = decode_wp_long_owner_diagnostic(
+        int(wp_owner_diag["OWNER_STATUS"]),
+        int(wp_owner_diag["STOCK_STATUS"]),
+        int(wp_owner_diag["STOCK_FAULT_BYTE"]),
+      )
 
     return ret
 
@@ -226,6 +234,7 @@ class CarState(CarStateBase):
       # decoder reports as unsupported without changing vehicle behavior.
       messages.append(("WP_LONG_DIAGNOSTIC", 0))
       messages.append(("WP_LONG_COMMAND_DIAGNOSTIC", 0))
+      messages.append(("WP_LONG_OWNER_DIAGNOSTIC", 0))
 
     return CANParser(DBC[CP.carFingerprint]["pt"], messages, 0)
 

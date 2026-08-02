@@ -12,7 +12,6 @@ from openpilot.selfdrive.car.chrysler import chryslercan
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   JEEP_LONG_ACTUATION_COMPILED,
-  MIN_ACTIVE_SPEED_MPS,
   JeepLongitudinalShadow,
   JeepLongitudinalTransportScheduler,
 )
@@ -196,6 +195,9 @@ class CarController(CarControllerBase):
               self.packer, self.jeep_long_envelope, transport_counter)
           )
           can_sends.extend(self.jeep_long_shadow_frames)
+          self.jeep_long_shadow.note_transport_sent(
+            self.jeep_long_envelope,
+          )
         else:
           self.jeep_long_transport_frames = (
             chryslercan.create_wp_long_transport_messages(
@@ -214,6 +216,9 @@ class CarController(CarControllerBase):
         f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
         f"mode={self.jeep_long_envelope.command_mode}, "
         f"brake_latched={self.jeep_long_envelope.brake_latched}, "
+        f"stop={self.jeep_long_envelope.stop_request}, "
+        f"go={self.jeep_long_envelope.go_request}, "
+        f"low_speed_state={self.jeep_long_envelope.low_speed_state}, "
         f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )
@@ -347,10 +352,6 @@ class CarController(CarControllerBase):
 
       can_sends.append(chryslercan.create_lkas_command(self.packer, self.CP, int(apply_steer), lkas_control_bit))
 
-    if (self.CP.carFingerprint in JEEP_LONG_CARS and
-        self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20):
-      self.update_b6y_standstill_hold(CC, CS, can_sends)
-
     self.frame += 1
 
     new_actuators = CC.actuators.as_builder()
@@ -428,7 +429,7 @@ class CarController(CarControllerBase):
     if not CS.out.cruiseState.available:
       return False, "cruise_unavailable"
     if not CS.out.cruiseState.enabled:
-      return False, "stock_acc_inactive"
+      return False, "op_long_inactive"
     if CS.out.accFaulted:
       return False, "acc_fault"
     if CS.out.brakePressed:
@@ -437,8 +438,6 @@ class CarController(CarControllerBase):
       return False, "gas_pressed"
     if CS.out.stockAeb:
       return False, "stock_aeb"
-    if CS.out.standstill or CS.out.vEgo < MIN_ACTIVE_SPEED_MPS:
-      return False, "not_moving"
     return True, "eligible"
 
   def update_jeep_long_plan_shadow(
@@ -579,6 +578,18 @@ class CarController(CarControllerBase):
         f"stock_acc_available={command.stock_acc_available},"
         f"stock_acc_active={command.stock_acc_active},"
         f"stock_accel={command.stock_accel_mps2:.4f}"
+      )
+    owner = CS.wp_long_owner_diagnostic
+    if owner is not None:
+      cloudlog.info(
+        f"Jeep WP long owner: valid={owner.valid},"
+        f"owner={owner.owner_name},"
+        f"stock_valid={owner.stock_valid},"
+        f"stock_available={owner.stock_available},"
+        f"stock_active={owner.stock_active},"
+        f"stock_fault={owner.stock_fault},"
+        f"stock_collision={owner.stock_collision},"
+        f"cancel_injected={owner.cancel_injected}"
       )
 
   def log_jeep_radar_shadow(self, CS):
