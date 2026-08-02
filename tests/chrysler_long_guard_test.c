@@ -11,7 +11,7 @@ static bool valid_brake_command(void) {
 
 
 int main(void) {
-  assert(CHRYSLER_LONG_ACTUATION == 0U);
+  assert(CHRYSLER_LONG_ACTUATION == 1U);
 
   // Diagnostic packing preserves the two raw factory DAS_3 words and the
   // exact output engine word in their original byte order.
@@ -26,13 +26,16 @@ int main(void) {
   assert(!chrysler_long_is_fresh(1000000U, 950000U, false, 100000U));
   assert(chrysler_long_is_fresh(50U, 0xFFFFFFF0U, true, 100U));
 
-  // wp-b6k is compile-time recovery firmware: even an otherwise valid runtime
-  // request cannot substitute any factory DAS_3 propulsion or brake frame.
-  assert(!chrysler_long_should_substitute_das3(true, false, 0));
-  assert(!chrysler_long_should_substitute_das3(true, false, 1));
-  assert(!chrysler_long_should_substitute_das3(true, true, 2));
-  assert(!chrysler_long_should_substitute_das3(true, false, 7));
-  assert(!chrysler_long_should_substitute_das3(false, false, 0));
+  // Neutral stock frames accept either calibrated propulsion or braking.
+  assert(chrysler_long_should_substitute_das3(true, false, 0, 0));
+  assert(chrysler_long_should_substitute_das3(true, false, 0, 1));
+  // Never replace a factory brake request with propulsion. A calibrated brake
+  // request may replace it without changing command direction.
+  assert(!chrysler_long_should_substitute_das3(true, false, 1, 0));
+  assert(chrysler_long_should_substitute_das3(true, false, 1, 1));
+  assert(!chrysler_long_should_substitute_das3(true, true, 0, 1));
+  assert(!chrysler_long_should_substitute_das3(true, false, 2, 1));
+  assert(!chrysler_long_should_substitute_das3(false, false, 0, 0));
 
   // A healthy 25 Hz private snapshot remains fresh throughout the independent
   // 50 Hz stock receive cadence. Liveness depends on elapsed time, not on a
@@ -80,6 +83,10 @@ int main(void) {
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
     2310, 100, false, false, false));
+  assert(chrysler_long_commands_valid(
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
+    0, false, true,
+    CHRYSLER_LONG_TORQUE_MAX_RAW, 100, false, false, false));
 
   assert(!chrysler_long_commands_valid(
     false, true, true, false, false, 2866, 1, false, false,
@@ -94,7 +101,7 @@ int main(void) {
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
-    2500, 100, false, false, false));
+    CHRYSLER_LONG_TORQUE_MAX_RAW + 1, 100, false, false, false));
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, 2866, 1, false, false,
     2000, 100, true, false, false));

@@ -4,13 +4,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// wp-b6k recovery build. Factory ACC owns longitudinal control and every
-// intercepted factory command must pass through unchanged. This remains
-// source-controlled and cannot be enabled or altered with a compiler flag.
+// wp-b6n calibrated actuation build. Runtime substitution remains behind every
+// freshness, integrity, pedal, collision, speed, and command-envelope guard
+// below and cannot be enabled or altered with a compiler flag.
 #ifdef CHRYSLER_LONG_ACTUATION
 #error "CHRYSLER_LONG_ACTUATION must not be set from the build command"
 #endif
-#define CHRYSLER_LONG_ACTUATION 0U
+#define CHRYSLER_LONG_ACTUATION 1U
 
 #define CHRYSLER_LONG_BRAKE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_DASH_TIMEOUT_US 250000U
@@ -35,10 +35,11 @@
 #define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094   // stock no-brake sentinel
 
-// Private engine-torque command uses the stock DAS_3 scaling:
-// raw * 0.25 - 500 Nm. The calibrated shadow ceiling is 100 Nm.
+// Private engine-torque command uses the stock DAS_3 scaling. b6m's matched
+// planner/factory samples reached 422.25 Nm; raw 3700 is the independent
+// 425 Nm ceiling and remains below the unrelated 547 Nm factory outlier.
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 2400
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 3700
 
 // SPEED_1 raw * 0.071028 m/s. The initial scope is moving-only and excludes
 // standstill, stop, go, brake preparation, and hold behavior.
@@ -145,16 +146,19 @@ static inline uint32_t chrysler_long_wheel_button_passthrough(
   return word;
 }
 
-// The factory ACC module supervises its normal braking request in DAS_3. The
-// two b6i road faults occurred after command type 1 was replaced by an openpilot
-// propulsion command. Defer that frame to factory ACC immediately; collision
-// and AEB frames remain covered by the existing stock_collision guard.
+// The two b6i road faults occurred when a stock brake request was replaced by
+// openpilot propulsion. Preserve that fail-closed arbitration: a stock brake
+// may be replaced only by another brake request. Openpilot may still request
+// braking while the stock frame is neutral. Collision/AEB always pass through.
 static inline bool chrysler_long_should_substitute_das3(
     const bool guard_enabled,
     const bool stock_collision,
-    const int stock_command_type) {
+    const int stock_command_type,
+    const int requested_command_type) {
   return (CHRYSLER_LONG_ACTUATION != 0U) && guard_enabled &&
-         !stock_collision && (stock_command_type == 0);
+         !stock_collision &&
+         ((stock_command_type == 0) ||
+          ((stock_command_type == 1) && (requested_command_type == 1)));
 }
 
 static inline bool chrysler_long_counters_aligned(
