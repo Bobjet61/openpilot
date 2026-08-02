@@ -209,8 +209,11 @@ class CarController(CarControllerBase):
         f"requested={self.jeep_long_envelope.requested_accel:.3f}, "
         f"limited={self.jeep_long_envelope.limited_accel:.3f}, "
         f"brake={self.jeep_long_envelope.brake_active}, "
+        f"brake_cmd={self.jeep_long_envelope.brake_accel_mps2:.3f}, "
         f"engine={self.jeep_long_envelope.engine_active}, "
         f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
+        f"mode={self.jeep_long_envelope.command_mode}, "
+        f"brake_latched={self.jeep_long_envelope.brake_latched}, "
         f"transport={self.jeep_long_envelope.transport_enabled}, "
         f"host_enabled={self.jeep_long_envelope.host_enabled}"
       )

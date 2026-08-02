@@ -164,7 +164,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertFalse(unsupported.valid)
 
-  def test_b6n_enables_independently_guarded_transport_and_actuation(self):
+  def test_b6o_enables_independently_guarded_transport_and_actuation(self):
     self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
     self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)
     self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
@@ -339,7 +339,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       self.assertFalse(result.transport_enabled)
       self.assertFalse(result.host_enabled)
 
-  def test_b6n_adds_all_independent_longitudinal_safety_flags(self):
+  def test_b6o_adds_all_independent_longitudinal_safety_flags(self):
     self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
     self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 116)
     with patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", False):
@@ -360,12 +360,15 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
 
   def test_ineligible_fails_to_zero(self):
     shadow = JeepLongitudinalShadow()
-    shadow.update(1.0, eligible=True)
+    for _ in range(60):
+      shadow.update(1.0, eligible=True, speed_mps=15.0)
     result = shadow.update(1.0, eligible=False)
     self.assertEqual(result.limited_accel, 0.0)
     self.assertFalse(result.brake_active)
     self.assertFalse(result.engine_active)
     self.assertEqual(result.brake_accel_mps2, 0.0)
+    self.assertEqual(result.command_mode, "inactive")
+    self.assertFalse(result.brake_latched)
 
   def test_brake_and_engine_are_mutually_exclusive(self):
     brake_shadow = JeepLongitudinalShadow()
@@ -404,7 +407,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
 
   def test_host_torque_ceiling_covers_matched_oem_range_only(self):
     shadow = JeepLongitudinalShadow()
-    for _ in range(70):
+    for _ in range(80):
       result = shadow.update(ACCEL_MAX, eligible=True, speed_mps=40.0)
     self.assertEqual(result.limited_accel, ACCEL_MAX)
     self.assertTrue(result.engine_active)
@@ -419,6 +422,101 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(result.host_enabled)
     self.assertFalse(result.brake_active)
     self.assertFalse(result.engine_active)
+
+  def test_recorded_b6n_boundary_cluster_stays_out_of_braking(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(50):
+      result = shadow.update(0.0, eligible=True, speed_mps=23.6)
+    self.assertTrue(result.engine_active)
+
+    # Segment 6 around 53-56 seconds repeatedly crossed b6n's old -0.05
+    # boundary and alternated roughly 224 Nm with braking. Five controller
+    # cycles approximate each retained 10 Hz qlog sample.
+    recorded_accels = (
+      -0.0392, -0.1008, -0.0562, -0.0061, -0.0210,
+      -0.0504, -0.0182, -0.0448, -0.1075, -0.1196, -0.0487,
+    )
+    modes = []
+    for accel in recorded_accels:
+      for _ in range(5):
+        result = shadow.update(accel, eligible=True, speed_mps=23.6)
+        modes.append(result.command_mode)
+        self.assertFalse(result.brake_active)
+        self.assertGreaterEqual(result.engine_torque_nm, 0.0)
+    self.assertNotIn("brake", modes)
+
+  def test_propulsion_and_braking_are_separated_by_coast_and_slew(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(80):
+      result = shadow.update(0.5, eligible=True, speed_mps=23.6)
+    self.assertTrue(result.engine_active)
+
+    previous = result
+    saw_coast = False
+    saw_brake = False
+    brake_latched_cycle = None
+    brake_active_cycle = None
+    for cycle in range(180):
+      result = shadow.update(-1.0, eligible=True, speed_mps=23.6)
+      self.assertFalse(result.engine_active and result.brake_active)
+      self.assertLessEqual(
+        abs(result.engine_torque_nm - previous.engine_torque_nm), 12.0001,
+      )
+      self.assertLessEqual(
+        abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0401,
+      )
+      if result.command_mode == "coast":
+        saw_coast = True
+      if result.brake_latched and brake_latched_cycle is None:
+        brake_latched_cycle = cycle
+      if result.brake_active:
+        saw_brake = True
+        if brake_active_cycle is None:
+          brake_active_cycle = cycle
+        self.assertEqual(result.engine_torque_nm, 0.0)
+      previous = result
+    self.assertTrue(saw_coast)
+    self.assertTrue(saw_brake)
+    self.assertIsNotNone(brake_latched_cycle)
+    self.assertIsNotNone(brake_active_cycle)
+    self.assertLessEqual(brake_active_cycle - brake_latched_cycle, 20)
+
+    saw_coast = False
+    saw_engine = False
+    for _ in range(220):
+      result = shadow.update(0.5, eligible=True, speed_mps=23.6)
+      self.assertFalse(result.engine_active and result.brake_active)
+      self.assertLessEqual(
+        abs(result.engine_torque_nm - previous.engine_torque_nm), 12.0001,
+      )
+      self.assertLessEqual(
+        abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0401,
+      )
+      if result.command_mode == "coast":
+        saw_coast = True
+      if result.engine_active:
+        saw_engine = True
+        self.assertEqual(result.brake_accel_mps2, 0.0)
+      previous = result
+    self.assertTrue(saw_coast)
+    self.assertTrue(saw_engine)
+
+  def test_brake_hysteresis_does_not_release_on_small_rebound(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(100):
+      result = shadow.update(-1.0, eligible=True, speed_mps=15.0)
+    self.assertTrue(result.brake_latched)
+    self.assertTrue(result.brake_active)
+
+    while result.limited_accel < -0.15:
+      result = shadow.update(-0.15, eligible=True, speed_mps=15.0)
+    for _ in range(10):
+      result = shadow.update(-0.15, eligible=True, speed_mps=15.0)
+      self.assertTrue(result.brake_latched)
+
+    while result.limited_accel < -0.07:
+      result = shadow.update(0.0, eligible=True, speed_mps=15.0)
+    self.assertFalse(result.brake_latched)
 
   def test_fca_checksum_ignores_only_final_byte(self):
     payload = bytearray.fromhex("1020304050607000")

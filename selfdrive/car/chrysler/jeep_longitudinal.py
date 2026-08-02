@@ -24,7 +24,7 @@ WP_LONG_DIAGNOSTIC_FAILURES = {
 }
 
 
-# b6n calibrated actuation build. Runtime output still requires the host,
+# b6o blended actuation build. Runtime output still requires the host,
 # embedded Panda, and external White Panda to independently accept the same
 # fresh, counter-matched, pedal-free, collision-free command cycle.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
@@ -50,13 +50,16 @@ if (
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
 ACCEL_MIN = -3.0
 ACCEL_MAX = 1.25
+# Telemetry-only planner classification threshold. b6o actuator mode selection
+# uses the blended hysteresis thresholds below, not this legacy deadband.
 ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
 
 # Match the White Panda's moving-only gate (raw wheel speed 29, approximately
-# 2.06 m/s). Stop, go, brake preparation, and hold remain unavailable.
+# 2.06 m/s). This generator never commands stop, go, or brake preparation;
+# the separately guarded b6y standstill bridge remains independent.
 MIN_ACTIVE_SPEED_MPS = 2.1
 
 # The embedded Panda rejects private cycles closer than 15 ms. Even a 20 ms
@@ -82,6 +85,25 @@ ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
 # Matched planner/factory samples reached 422.25 Nm. Keep the host and both
 # Panda guards at 425 Nm, below the unrelated 547 Nm factory outlier.
 ENGINE_TORQUE_MAX_NM = 425.0
+
+# b6n switched directly from substantial speed-feed-forward torque to braking
+# whenever requested acceleration crossed -0.05 m/s^2. The recorded b6n route
+# repeated that transition 34 times in 502 seconds, including 224 Nm -> brake
+# -> 224 Nm cycles at freeway speed. b6o fades propulsion through a coast band,
+# latches braking only after a meaningful deceleration request, and requires
+# one actuator to reach zero before enabling the other.
+TORQUE_BLEND_ZERO_ACCEL = -0.20
+TORQUE_BLEND_FULL_ACCEL = 0.0
+BRAKE_ENTER_ACCEL = -0.20
+BRAKE_EXIT_ACCEL = -0.08
+BRAKE_BLEND_FULL_ACCEL = -0.50
+ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
+ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
+BRAKE_APPLY_RATE_MPS3 = 1.5
+BRAKE_RELEASE_RATE_MPS3 = 2.0
+ENGINE_TORQUE_ZERO_EPSILON_NM = 0.5
+BRAKE_ZERO_EPSILON_MPS2 = 0.005
+COAST_INTERLOCK_CYCLES = 5
 
 
 def fca_checksum(dat: bytes) -> int:
@@ -117,6 +139,8 @@ class JeepLongitudinalEnvelope:
   brake_active: bool
   engine_active: bool
   engine_torque_nm: float
+  command_mode: str
+  brake_latched: bool
   transport_enabled: bool
   host_enabled: bool
   eligible: bool
@@ -206,6 +230,18 @@ def clip(value: float, lower: float, upper: float) -> float:
   return min(max(value, lower), upper)
 
 
+def move_toward(
+    current: float,
+    target: float,
+    increasing_rate: float,
+    decreasing_rate: float,
+    dt: float = COMMAND_DT,
+) -> float:
+  if target > current:
+    return min(target, current + increasing_rate * dt)
+  return max(target, current - decreasing_rate * dt)
+
+
 def jeep_long_shadow_safety_param(
   safety_param: int,
   shadow_flag: int,
@@ -226,6 +262,11 @@ class JeepLongitudinalShadow:
 
   def __init__(self):
     self.accel_last = 0.0
+    self.engine_torque_last_nm = 0.0
+    self.brake_accel_last_mps2 = 0.0
+    self.brake_latched = False
+    self.last_nonzero_mode = "coast"
+    self.coast_interlock_remaining = 0
 
   def update(
       self,
@@ -241,34 +282,141 @@ class JeepLongitudinalShadow:
 
     if not eligible:
       limited_accel = 0.0
+      self.engine_torque_last_nm = 0.0
+      self.brake_accel_last_mps2 = 0.0
+      self.brake_latched = False
+      self.last_nonzero_mode = "coast"
+      self.coast_interlock_remaining = 0
     else:
       lower = self.accel_last - JERK_DOWN * COMMAND_DT
       upper = self.accel_last + JERK_UP * COMMAND_DT
       limited_accel = clip(requested_accel, lower, upper)
 
     self.accel_last = limited_accel
-    brake_active = eligible and limited_accel < -ACCEL_DEADBAND
-    brake_accel_mps2 = (
-      clip(
-        BRAKE_ACCEL_INTERCEPT_MPS2 + BRAKE_ACCEL_GAIN * limited_accel,
-        ACCEL_MIN,
-        0.0,
-      )
-      if brake_active else 0.0
-    )
+    if eligible:
+      if self.brake_latched:
+        if limited_accel >= BRAKE_EXIT_ACCEL:
+          self.brake_latched = False
+      elif limited_accel <= BRAKE_ENTER_ACCEL:
+        self.brake_latched = True
+
     calibration_speed_mps = clip(
       speed_mps, 0.0, ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS,
     )
-    engine_torque_nm = 0.0
-    if eligible and not brake_active:
-      engine_torque_nm = clip(
+    desired_engine_torque_nm = 0.0
+    if eligible and not self.brake_latched:
+      base_engine_torque_nm = clip(
         ENGINE_TORQUE_INTERCEPT_NM
         + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
         + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps,
         0.0,
         ENGINE_TORQUE_MAX_NM,
       )
+      torque_blend = clip(
+        (limited_accel - TORQUE_BLEND_ZERO_ACCEL)
+        / (TORQUE_BLEND_FULL_ACCEL - TORQUE_BLEND_ZERO_ACCEL),
+        0.0,
+        1.0,
+      )
+      desired_engine_torque_nm = base_engine_torque_nm * torque_blend
+
+    desired_brake_accel_mps2 = 0.0
+    if eligible and self.brake_latched:
+      calibrated_brake_accel_mps2 = clip(
+        BRAKE_ACCEL_INTERCEPT_MPS2 + BRAKE_ACCEL_GAIN * limited_accel,
+        ACCEL_MIN,
+        0.0,
+      )
+      brake_blend = clip(
+        (BRAKE_EXIT_ACCEL - limited_accel)
+        / (BRAKE_EXIT_ACCEL - BRAKE_BLEND_FULL_ACCEL),
+        0.0,
+        1.0,
+      )
+      desired_brake_accel_mps2 = (
+        calibrated_brake_accel_mps2 * brake_blend
+      )
+
+    if not eligible:
+      engine_torque_nm = 0.0
+      brake_accel_mps2 = 0.0
+    elif desired_brake_accel_mps2 < 0.0:
+      engine_torque_nm = move_toward(
+        self.engine_torque_last_nm,
+        0.0,
+        ENGINE_TORQUE_RATE_UP_NM_PER_S,
+        ENGINE_TORQUE_RATE_DOWN_NM_PER_S,
+      )
+      if engine_torque_nm <= ENGINE_TORQUE_ZERO_EPSILON_NM:
+        engine_torque_nm = 0.0
+        if self.last_nonzero_mode == "engine":
+          if self.coast_interlock_remaining == 0:
+            self.coast_interlock_remaining = COAST_INTERLOCK_CYCLES
+          self.coast_interlock_remaining -= 1
+          brake_accel_mps2 = 0.0
+          if self.coast_interlock_remaining == 0:
+            self.last_nonzero_mode = "coast"
+        else:
+          brake_accel_mps2 = move_toward(
+            self.brake_accel_last_mps2,
+            desired_brake_accel_mps2,
+            BRAKE_RELEASE_RATE_MPS3,
+            BRAKE_APPLY_RATE_MPS3,
+          )
+      else:
+        brake_accel_mps2 = move_toward(
+          self.brake_accel_last_mps2,
+          0.0,
+          BRAKE_RELEASE_RATE_MPS3,
+          BRAKE_APPLY_RATE_MPS3,
+        )
+    else:
+      brake_accel_mps2 = move_toward(
+        self.brake_accel_last_mps2,
+        0.0,
+        BRAKE_RELEASE_RATE_MPS3,
+        BRAKE_APPLY_RATE_MPS3,
+      )
+      if brake_accel_mps2 >= -BRAKE_ZERO_EPSILON_MPS2:
+        brake_accel_mps2 = 0.0
+        if desired_engine_torque_nm > 0.0 and self.last_nonzero_mode == "brake":
+          if self.coast_interlock_remaining == 0:
+            self.coast_interlock_remaining = COAST_INTERLOCK_CYCLES
+          self.coast_interlock_remaining -= 1
+          engine_torque_nm = 0.0
+          if self.coast_interlock_remaining == 0:
+            self.last_nonzero_mode = "coast"
+        else:
+          engine_torque_nm = move_toward(
+            self.engine_torque_last_nm,
+            desired_engine_torque_nm,
+            ENGINE_TORQUE_RATE_UP_NM_PER_S,
+            ENGINE_TORQUE_RATE_DOWN_NM_PER_S,
+          )
+      else:
+        engine_torque_nm = move_toward(
+          self.engine_torque_last_nm,
+          0.0,
+          ENGINE_TORQUE_RATE_UP_NM_PER_S,
+          ENGINE_TORQUE_RATE_DOWN_NM_PER_S,
+        )
+
+    self.engine_torque_last_nm = engine_torque_nm
+    self.brake_accel_last_mps2 = brake_accel_mps2
+    brake_active = brake_accel_mps2 < 0.0
     engine_active = engine_torque_nm > 0.0
+    if brake_active and engine_active:
+      raise RuntimeError("Jeep longitudinal torque/brake interlock violated")
+    command_mode = (
+      "brake" if brake_active else "engine" if engine_active
+      else "coast" if eligible else "inactive"
+    )
+    if engine_active:
+      self.last_nonzero_mode = "engine"
+      self.coast_interlock_remaining = 0
+    elif brake_active:
+      self.last_nonzero_mode = "brake"
+      self.coast_interlock_remaining = 0
 
     transport_enabled = JEEP_LONG_SHADOW_TRANSPORT_COMPILED and eligible
     return JeepLongitudinalEnvelope(
@@ -278,6 +426,8 @@ class JeepLongitudinalShadow:
       brake_active=brake_active,
       engine_active=engine_active,
       engine_torque_nm=engine_torque_nm,
+      command_mode=command_mode,
+      brake_latched=self.brake_latched,
       transport_enabled=transport_enabled,
       host_enabled=JEEP_LONG_ACTUATION_COMPILED and transport_enabled,
       eligible=eligible,
