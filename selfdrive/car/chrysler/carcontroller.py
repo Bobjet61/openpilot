@@ -181,6 +181,7 @@ class CarController(CarControllerBase):
       self.jeep_long_envelope = self.jeep_long_shadow.update(
         requested_accel,
         jeep_long_vehicle_eligible,
+        CS.out.vEgo,
       )
       self.jeep_long_shadow_frames = []
       self.jeep_long_transport_frames = []

@@ -50,13 +50,13 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
     self.assertEqual(tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)), (9, 9, 9))
     self.assertTrue(all(msg[2][7] == fca_checksum(msg[2]) for msg in (brake, dash, torque)))
 
-  def test_private_engine_torque_uses_das3_scaling(self):
+  def test_private_engine_torque_uses_das3_scaling_at_b6n_ceiling(self):
     _, _, dat, _ = self.packer.make_can_msg(
       "WP_ACC_TORQUE_CMD", 0,
-      {"ENGINE_TORQUE_REQUEST_MAX": 1, "ENGINE_TORQUE_REQUEST": 100},
+      {"ENGINE_TORQUE_REQUEST_MAX": 1, "ENGINE_TORQUE_REQUEST": 425},
     )
     raw = ((dat[4] & 0x7F) << 8) | dat[5]
-    self.assertEqual(raw, 2400)
+    self.assertEqual(raw, 3700)
     self.assertEqual(dat[4] >> 7, 1)
 
   def test_command_diagnostic_preserves_factory_and_output_das3_fields(self):
@@ -104,6 +104,7 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
   def test_shadow_dashboard_tracks_independent_host_gate(self):
     envelope = SimpleNamespace(
       limited_accel=0.0,
+      brake_accel_mps2=0.0,
       brake_active=False,
       engine_active=False,
       engine_torque_nm=0.0,

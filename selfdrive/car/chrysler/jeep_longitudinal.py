@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import math
 
 
 WP_LONG_DIAGNOSTIC_SIGNATURE = 0xB0
@@ -23,20 +24,19 @@ WP_LONG_DIAGNOSTIC_FAILURES = {
 }
 
 
-# b6k recovery build: factory ACC owns longitudinal control. Do not send the
-# private White Panda command transport, expose Experimental Mode, or request
-# longitudinal actuation. The response-5 steering and lateral tune are
-# independent of these gates and remain unchanged.
-JEEP_LONG_SHADOW_TRANSPORT_COMPILED = False
+# b6n calibrated actuation build. Runtime output still requires the host,
+# embedded Panda, and external White Panda to independently accept the same
+# fresh, counter-matched, pedal-free, collision-free command cycle.
+JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
 
 # Tags Panda-rejected private frames in their USB rejection receipts. The tag
 # never reaches a vehicle CAN transmit queue and does not change acceptance.
-JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = False
+JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = True
 
 # Independent actuation gate. The embedded Panda and the external White Panda
 # each retain an independent fail-closed gate and validate the complete command
 # envelope before vehicle CAN is modified.
-JEEP_LONG_ACTUATION_COMPILED = False
+JEEP_LONG_ACTUATION_COMPILED = True
 
 if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
   raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
@@ -49,7 +49,7 @@ if (
 # Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
 ACCEL_MIN = -3.0
-ACCEL_MAX = 1.0
+ACCEL_MAX = 1.25
 ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
 JERK_UP = 1.0
@@ -68,14 +68,20 @@ MIN_ACTIVE_SPEED_MPS = 2.1
 # Advance the counter only for cycles actually sent.
 TRANSPORT_MIN_SEND_INTERVAL_NS = 25_000_000
 
-# Recovered from the Chrysler Advanced implementation and used only to map the
-# bounded acceleration request into the existing guarded torque envelope.
-# Make the production controller's bounded +1.0 m/s^2 command reach the
-# already-enforced 100 Nm host and White Panda ceiling. b6g used 1200/15.5,
-# which topped out at only 77.4 Nm and could not maintain speed in the Jeep.
-VEHICLE_MASS_SCALE_KG = 1550.0
-NON_HYBRID_GEAR_RATIO = 15.5
-ENGINE_TORQUE_MAX_NM = 100.0
+# b6m's synchronized factory-ACC capture established both command paths. The
+# braking fit uses 681 same-direction samples (R^2 0.740). Propulsion uses a
+# deliberately simple speed-aware feed-forward fit over 1,007 same-direction
+# samples; remaining error is handled by openpilot's normal feedback loop.
+BRAKE_ACCEL_INTERCEPT_MPS2 = -0.2176
+BRAKE_ACCEL_GAIN = 0.8012
+ENGINE_TORQUE_INTERCEPT_NM = -44.2
+ENGINE_TORQUE_ACCEL_GAIN = 163.5
+ENGINE_TORQUE_SPEED_GAIN = 11.5
+# Do not extrapolate the speed term beyond the 25.58 m/s calibration drive.
+ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
+# Matched planner/factory samples reached 422.25 Nm. Keep the host and both
+# Panda guards at 425 Nm, below the unrelated 547 Nm factory outlier.
+ENGINE_TORQUE_MAX_NM = 425.0
 
 
 def fca_checksum(dat: bytes) -> int:
@@ -107,6 +113,7 @@ def fca_checksum(dat: bytes) -> int:
 class JeepLongitudinalEnvelope:
   requested_accel: float
   limited_accel: float
+  brake_accel_mps2: float
   brake_active: bool
   engine_active: bool
   engine_torque_nm: float
@@ -220,7 +227,16 @@ class JeepLongitudinalShadow:
   def __init__(self):
     self.accel_last = 0.0
 
-  def update(self, requested_accel: float, eligible: bool) -> JeepLongitudinalEnvelope:
+  def update(
+      self,
+      requested_accel: float,
+      eligible: bool,
+      speed_mps: float = 0.0,
+  ) -> JeepLongitudinalEnvelope:
+    if not math.isfinite(requested_accel) or not math.isfinite(speed_mps):
+      requested_accel = 0.0
+      speed_mps = 0.0
+      eligible = False
     requested_accel = clip(requested_accel, ACCEL_MIN, ACCEL_MAX)
 
     if not eligible:
@@ -232,20 +248,33 @@ class JeepLongitudinalShadow:
 
     self.accel_last = limited_accel
     brake_active = eligible and limited_accel < -ACCEL_DEADBAND
-    engine_active = eligible and limited_accel > ACCEL_DEADBAND
-    engine_torque_nm = (
+    brake_accel_mps2 = (
       clip(
-        limited_accel * VEHICLE_MASS_SCALE_KG / NON_HYBRID_GEAR_RATIO,
+        BRAKE_ACCEL_INTERCEPT_MPS2 + BRAKE_ACCEL_GAIN * limited_accel,
+        ACCEL_MIN,
+        0.0,
+      )
+      if brake_active else 0.0
+    )
+    calibration_speed_mps = clip(
+      speed_mps, 0.0, ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS,
+    )
+    engine_torque_nm = 0.0
+    if eligible and not brake_active:
+      engine_torque_nm = clip(
+        ENGINE_TORQUE_INTERCEPT_NM
+        + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
+        + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps,
         0.0,
         ENGINE_TORQUE_MAX_NM,
       )
-      if engine_active else 0.0
-    )
+    engine_active = engine_torque_nm > 0.0
 
     transport_enabled = JEEP_LONG_SHADOW_TRANSPORT_COMPILED and eligible
     return JeepLongitudinalEnvelope(
       requested_accel=requested_accel,
       limited_accel=limited_accel,
+      brake_accel_mps2=brake_accel_mps2,
       brake_active=brake_active,
       engine_active=engine_active,
       engine_torque_nm=engine_torque_nm,

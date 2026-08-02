@@ -98,7 +98,7 @@ def create_wp_long_shadow_messages(packer, envelope, counter):
     "ACC_GO": 0,
     # Stock DAS_3 uses its +4.0 m/s^2 encoded maximum as the inactive
     # deceleration sentinel whenever ACC_DECEL_REQ is zero.
-    "ACC_DECEL_CMD": envelope.limited_accel if envelope.brake_active else 4.0,
+    "ACC_DECEL_CMD": envelope.brake_accel_mps2 if envelope.brake_active else 4.0,
     "ACC_AVAILABLE": envelope.eligible,
     "ACC_ENABLED": envelope.eligible,
     # Stock logs show brake-prep is not a normal-braking enable bit. The
