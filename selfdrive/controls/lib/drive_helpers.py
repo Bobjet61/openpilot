@@ -37,6 +37,16 @@ CRUISE_INTERVAL_SIGN = {
   ButtonType.decelCruise: -1,
 }
 
+
+def is_uninitialized_resume_button(CP, button_type):
+  """Return whether a button needs a previously initialized set speed."""
+  # The Jeep has separate SET+ and RES buttons. With openpilot longitudinal
+  # control, SET+ is a valid first SET command; only physical RES should need
+  # a speed from the current cruise-available session.
+  if CP.carName == "chrysler" and CP.openpilotLongitudinalControl and CP.pcmCruiseSpeed:
+    return button_type == ButtonType.resumeCruise
+  return button_type in (ButtonType.accelCruise, ButtonType.resumeCruise)
+
 # Constants for Limit controllers.
 LIMIT_ADAPT_ACC = -1.  # m/s^2 Ideal acceleration for the adapting (braking) phase when approaching speed limits.
 LIMIT_MIN_ACC = -1.5  # m/s^2 Maximum deceleration allowed for limit controllers to provide.

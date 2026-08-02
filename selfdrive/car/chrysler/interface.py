@@ -142,12 +142,18 @@ class CarInterface(CarInterfaceBase):
 
     self.CS.mads_enabled = self.get_sp_cruise_main_state(ret, self.CS)
 
-    self.CS.accEnabled = self.get_sp_v_cruise_non_pcm_state(ret, self.CS.accEnabled,
-                                                            buttonEvents, c.vCruise,
-                                                            enable_buttons=(ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.resumeCruise) if not self.CP.pcmCruiseSpeed else
-                                                                           (ButtonType.accelCruise, ButtonType.decelCruise),
-                                                            resume_button=(ButtonType.resumeCruise,) if not self.CP.pcmCruiseSpeed else
-                                                                          (ButtonType.accelCruise, ButtonType.resumeCruise))
+    enable_buttons = (
+      (ButtonType.accelCruise, ButtonType.decelCruise, ButtonType.resumeCruise)
+      if not self.CP.pcmCruiseSpeed
+      else (ButtonType.accelCruise, ButtonType.decelCruise)
+    )
+    self.CS.accEnabled = self.get_sp_v_cruise_non_pcm_state(
+      ret, self.CS.accEnabled, buttonEvents, c.vCruise,
+      enable_buttons=enable_buttons,
+      # SET+ is a valid first SET command for b6r. Only the separate physical
+      # RES button requires an initialized speed in this cruise session.
+      resume_button=(ButtonType.resumeCruise,),
+    )
 
     if ret.cruiseState.available:
       if self.enable_mads:

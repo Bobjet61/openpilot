@@ -96,6 +96,11 @@ BRAKE_ACCEL_INTERCEPT_MPS2 = -0.2176
 BRAKE_ACCEL_GAIN = 0.8012
 ENGINE_TORQUE_INTERCEPT_NM = -44.2
 ENGINE_TORQUE_ACCEL_GAIN = 163.5
+# b6q's successful route showed weak response during some positive requests,
+# while reaching the guarded 425 Nm ceiling in only 4.2% of relevant engine
+# samples. Add a modest 10% positive-request term below that unchanged ceiling
+# without altering zero/negative-acceleration calibration.
+ENGINE_TORQUE_POSITIVE_ACCEL_GAIN = 16.5
 ENGINE_TORQUE_SPEED_GAIN = 11.5
 # Do not extrapolate the speed term beyond the 25.58 m/s calibration drive.
 ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
@@ -103,14 +108,15 @@ ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
 # Panda guards at 425 Nm, below the unrelated 547 Nm factory outlier.
 ENGINE_TORQUE_MAX_NM = 425.0
 
-# b6p's failed route proved that the zero-before-opposite-actuator interlock
-# prevents direct overlap, but a narrow decision band still allowed slower
-# brake -> coast -> engine cycles. b6q removes propulsion by -0.05 m/s^2,
-# treats ordinary negative corrections through -0.40 m/s^2 as coast, and
-# requires a moderate braking request to persist for 200 ms. A strong raw
-# request bypasses that confirmation so urgent braking is never delayed by the
-# mapper's input jerk limiter.
-TORQUE_BLEND_ZERO_ACCEL = -0.05
+# b6q's route recorded 47 engine -> coast and 40 coast -> engine changes,
+# concentrated where the planner moved around its -0.05 m/s^2 propulsion
+# boundary. b6r uses separate entry and exit thresholds: once active, torque
+# tapers smoothly to zero through mild negative corrections, but it cannot
+# restart until the planner has made a positive request. The wide coast region
+# before BRAKE_ENTER_ACCEL and the engine/brake interlock remain unchanged.
+PROPULSION_ENTER_ACCEL = 0.02
+PROPULSION_EXIT_ACCEL = -0.15
+TORQUE_BLEND_ZERO_ACCEL = PROPULSION_EXIT_ACCEL
 TORQUE_BLEND_FULL_ACCEL = 0.0
 BRAKE_ENTER_ACCEL = -0.40
 BRAKE_IMMEDIATE_ACCEL = -0.75
@@ -335,6 +341,7 @@ class JeepLongitudinalShadow:
     self.brake_latched = False
     self.brake_immediate = False
     self.brake_entry_confirm_cycles = 0
+    self.propulsion_latched = False
     self.last_nonzero_mode = "coast"
     self.coast_interlock_remaining = 0
     self.low_speed_state = "drive"
@@ -362,6 +369,7 @@ class JeepLongitudinalShadow:
       self.brake_latched = False
       self.brake_immediate = False
       self.brake_entry_confirm_cycles = 0
+      self.propulsion_latched = False
       self.last_nonzero_mode = "coast"
       self.coast_interlock_remaining = 0
       self.low_speed_state = "drive"
@@ -396,6 +404,14 @@ class JeepLongitudinalShadow:
           self.brake_immediate = False
       else:
         self.brake_entry_confirm_cycles = 0
+
+      if self.brake_latched:
+        self.propulsion_latched = False
+      elif self.propulsion_latched:
+        if requested_accel <= PROPULSION_EXIT_ACCEL:
+          self.propulsion_latched = False
+      elif requested_accel >= PROPULSION_ENTER_ACCEL:
+        self.propulsion_latched = True
 
     # Enter the bounded low-speed state machine only after a braking stop or
     # when controls are first enabled at true standstill. Merely creeping
@@ -438,10 +454,11 @@ class JeepLongitudinalShadow:
       speed_mps, 0.0, ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS,
     )
     desired_engine_torque_nm = 0.0
-    if eligible and not self.brake_latched:
+    if eligible and not self.brake_latched and self.propulsion_latched:
       base_engine_torque_nm = clip(
         ENGINE_TORQUE_INTERCEPT_NM
         + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
+        + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * max(limited_accel, 0.0)
         + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps,
         0.0,
         ENGINE_TORQUE_MAX_NM,

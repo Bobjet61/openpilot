@@ -15,6 +15,7 @@ CARSTATE_PATH = Path(__file__).resolve().parents[1] / "carstate.py"
 INTERFACE_PATH = Path(__file__).resolve().parents[1] / "interface.py"
 CHRYSLERCAN_PATH = Path(__file__).resolve().parents[1] / "chryslercan.py"
 CONTROLSD_PATH = Path(__file__).resolve().parents[3] / "controls" / "controlsd.py"
+DRIVE_HELPERS_PATH = Path(__file__).resolve().parents[3] / "controls" / "lib" / "drive_helpers.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
 assert LONG_SPEC is not None and LONG_SPEC.loader is not None
 LONG = importlib.util.module_from_spec(LONG_SPEC)
@@ -245,6 +246,19 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       interface_source,
     )
     self.assertNotIn("ret.pcmCruiseSpeed =", interface_source)
+    self.assertIn("resume_button=(ButtonType.resumeCruise,)", interface_source)
+
+    controls_source = CONTROLSD_PATH.read_text(encoding="utf-8")
+    self.assertEqual(
+      controls_source.count("is_uninitialized_resume_button(self.CP, be.type)"),
+      2,
+    )
+    drive_helpers_source = DRIVE_HELPERS_PATH.read_text(encoding="utf-8")
+    self.assertIn(
+      'CP.carName == "chrysler" and CP.openpilotLongitudinalControl and CP.pcmCruiseSpeed',
+      drive_helpers_source,
+    )
+    self.assertIn("return button_type == ButtonType.resumeCruise", drive_helpers_source)
 
     planner_source = PLANNER_PATH.read_text(encoding="utf-8")
     self.assertIn(
@@ -370,6 +384,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual(result.brake_accel_mps2, 0.0)
     self.assertEqual(result.command_mode, "inactive")
     self.assertFalse(result.brake_latched)
+    self.assertFalse(shadow.propulsion_latched)
 
   def test_brake_and_engine_are_mutually_exclusive(self):
     brake_shadow = JeepLongitudinalShadow()
@@ -433,6 +448,37 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     reset = shadow.update(-0.20, eligible=True, speed_mps=15.0)
     self.assertFalse(reset.brake_latched)
     self.assertEqual(shadow.brake_entry_confirm_cycles, 0)
+
+  def test_b6r_propulsion_hysteresis_suppresses_boundary_chatter(self):
+    shadow = JeepLongitudinalShadow()
+    for _ in range(80):
+      result = shadow.update(0.5, eligible=True, speed_mps=20.0)
+    self.assertTrue(result.engine_active)
+    self.assertTrue(shadow.propulsion_latched)
+
+    # These requests cover the b6q route's engine/coast chatter cluster. Once
+    # propulsion is active, none crosses the separate -0.15 exit threshold.
+    for accel in (-0.03, -0.08, -0.13, -0.05, -0.11, -0.01):
+      for _ in range(10):
+        result = shadow.update(accel, eligible=True, speed_mps=20.0)
+        self.assertFalse(result.brake_active)
+        self.assertTrue(shadow.propulsion_latched)
+    self.assertTrue(result.engine_active)
+
+    # A real negative correction retires propulsion and it cannot restart on
+    # boundary noise. A later positive request explicitly re-arms it.
+    for _ in range(80):
+      result = shadow.update(-0.16, eligible=True, speed_mps=20.0)
+    self.assertFalse(shadow.propulsion_latched)
+    self.assertFalse(result.engine_active)
+    for _ in range(20):
+      result = shadow.update(-0.02, eligible=True, speed_mps=20.0)
+    self.assertFalse(shadow.propulsion_latched)
+    self.assertFalse(result.engine_active)
+    for _ in range(20):
+      result = shadow.update(0.03, eligible=True, speed_mps=20.0)
+    self.assertTrue(shadow.propulsion_latched)
+    self.assertTrue(result.engine_active)
 
   def test_low_speed_stop_holds_without_propulsion(self):
     shadow = JeepLongitudinalShadow()
@@ -599,7 +645,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       result = shadow.update(0.5, eligible=True, speed_mps=15.0)
     self.assertEqual(result.limited_accel, 0.5)
     self.assertTrue(result.engine_active)
-    self.assertAlmostEqual(result.engine_torque_nm, 210.05, places=2)
+    self.assertAlmostEqual(result.engine_torque_nm, 218.30, places=2)
 
   def test_host_torque_ceiling_covers_matched_oem_range_only(self):
     shadow = JeepLongitudinalShadow()
@@ -622,7 +668,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
   def test_recorded_b6n_boundary_cluster_stays_out_of_braking(self):
     shadow = JeepLongitudinalShadow()
     for _ in range(50):
-      result = shadow.update(0.0, eligible=True, speed_mps=23.6)
+      result = shadow.update(0.03, eligible=True, speed_mps=23.6)
     self.assertTrue(result.engine_active)
 
     # Segment 6 around 53-56 seconds repeatedly crossed b6n's old -0.05
@@ -640,6 +686,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
         self.assertFalse(result.brake_active)
         self.assertGreaterEqual(result.engine_torque_nm, 0.0)
     self.assertNotIn("brake", modes)
+    self.assertNotIn("coast", modes)
 
   def test_propulsion_and_braking_are_separated_by_coast_and_slew(self):
     shadow = JeepLongitudinalShadow()

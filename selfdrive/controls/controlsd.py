@@ -20,7 +20,7 @@ from openpilot.common.swaglog import cloudlog
 
 from openpilot.selfdrive.car.car_helpers import get_car_interface, get_startup_event
 from openpilot.selfdrive.controls.lib.alertmanager import AlertManager, set_offroad_alert
-from openpilot.selfdrive.controls.lib.drive_helpers import VCruiseHelper, clip_curvature, get_lag_adjusted_curvature
+from openpilot.selfdrive.controls.lib.drive_helpers import VCruiseHelper, clip_curvature, get_lag_adjusted_curvature, is_uninitialized_resume_button
 from openpilot.selfdrive.controls.lib.events import Events, ET
 from openpilot.selfdrive.controls.lib.latcontrol import LatControl, MIN_LATERAL_CONTROL_SPEED
 from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
@@ -246,7 +246,7 @@ class Controls:
       self.events.add(EventName.torqueNNLoad)
 
     # Block resume if cruise never previously enabled
-    resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
+    resume_pressed = any(is_uninitialized_resume_button(self.CP, be.type) for be in CS.buttonEvents)
     if not self.CP.pcmCruise and not self.v_cruise_helper.v_cruise_initialized and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
@@ -554,7 +554,7 @@ class Controls:
           if CS.cruiseState.enabled and not self.CS_prev.cruiseState.enabled:
             self.v_cruise_helper.initialize_v_cruise(CS, self.experimental_mode, self.is_metric, self.dynamic_experimental_control)
           # Block resume if cruise never previously enabled
-          resume_pressed = any(be.type in (ButtonType.accelCruise, ButtonType.resumeCruise) for be in CS.buttonEvents)
+          resume_pressed = any(is_uninitialized_resume_button(self.CP, be.type) for be in CS.buttonEvents)
           if not self.CP.pcmCruise and not self.v_cruise_helper.v_cruise_initialized and resume_pressed:
             self.current_alert_types.append(ET.NO_ENTRY)
           if self.events.contains(ET.SOFT_DISABLE):
