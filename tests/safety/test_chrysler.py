@@ -447,13 +447,24 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
 
+  def _refresh_safe_source(self, time_us, speed=0.0, counter=1):
+    self.safety.set_timer(time_us)
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=counter, ACC_AVAILABLE=1, ACC_ACTIVE=1,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(speed)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+
   def _tx_private_cycle(self, counter, time_us, decel_raw=4094,
                         command_type=0, torque_raw=2000,
-                        engine_request=False, enable=False):
+                        engine_request=False, enable=False,
+                        stop=False, go=False):
     self.safety.set_timer(time_us)
     return (
       self._tx(self._private_brake_msg(
         counter, decel_raw=decel_raw, command_type=command_type,
+        stop=stop, go=go,
       )),
       self._tx(self._private_dash_msg(counter, enable=enable)),
       self._tx(self._private_torque_msg(
@@ -603,7 +614,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     )
     self.assertEqual(
       self._tx_private_cycle(
-        15, 20_000, torque_raw=3700, engine_request=True,
+        15, 20_000, torque_raw=4000, engine_request=True,
       ),
       (True, True, True),
     )
@@ -676,11 +687,6 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
 
     self._reset_long_shadow()
     self._enable_safe_source()
-    self.assertTrue(self._rx(self._speed_msg(0)))
-    self.assertFalse(self._tx(self._private_brake_msg(0)))
-
-    self._reset_long_shadow()
-    self._enable_safe_source()
     self.assertTrue(self._rx(self._user_gas_msg(1)))
     self.assertFalse(self._tx(self._private_brake_msg(0)))
 
@@ -709,8 +715,13 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       self._private_brake_msg(0, command_type=2),
       self._private_brake_msg(0, available=False),
       self._private_brake_msg(0, enabled=False),
+      self._private_brake_msg(
+        0, stop=True, go=True, decel_raw=2866, command_type=1,
+      ),
       self._private_brake_msg(0, stop=True),
-      self._private_brake_msg(0, go=True),
+      self._private_brake_msg(
+        0, go=True, decel_raw=2866, command_type=1,
+      ),
       self._private_brake_msg(0, brake_prep=True),
       self._private_brake_msg(0, corrupt_checksum=True),
     )
@@ -719,10 +730,238 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       self._enable_safe_source()
       self.assertFalse(self._tx(message))
 
+  def test_private_stop_release_and_go_sequence(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+
+    # A GO bit cannot be sent in the first cycle after a braking hold.
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True, go=True),
+      (False, False, False),
+    )
+
+    # Start a clean valid sequence and require one complete neutral release
+    # cycle before the GO pulse.
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(2, 40_000, enable=True, go=True),
+      (True, True, True),
+    )
+
+  def test_private_go_pulse_is_bounded_and_cannot_repeat_from_creep(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True),
+      (True, True, True),
+    )
+
+    for counter, time_us in ((2, 40_000), (3, 60_000),
+                             (4, 80_000), (5, 100_000)):
+      self.assertEqual(
+        self._tx_private_cycle(counter, time_us, enable=True, go=True),
+        (True, True, True),
+      )
+
+    self._refresh_safe_source(120_000, speed=0.0, counter=2)
+    self.assertEqual(
+      self._tx_private_cycle(6, 120_000, enable=True, go=True),
+      (False, False, False),
+    )
+
+  def test_private_go_cannot_repeat_from_creep(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(2, 40_000, enable=True, go=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(3, 60_000, enable=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(4, 80_000, enable=True, go=True),
+      (False, False, False),
+    )
+
+  def test_private_creep_allows_only_bounded_post_go_launch_torque(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(2, 40_000, enable=True, go=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(3, 60_000, enable=True),
+      (True, True, True),
+    )
+    # The full factory capture begins a bounded engine request immediately
+    # after GO. This is allowed only after the complete low-speed sequence.
+    self._refresh_safe_source(80_000, speed=0.0, counter=2)
+    self.assertEqual(
+      self._tx_private_cycle(
+        4, 80_000, torque_raw=2800,
+        engine_request=True, enable=True,
+      ),
+      (True, True, True),
+    )
+    self._refresh_safe_source(100_000, speed=0.0, counter=3)
+    self.assertEqual(
+      self._tx_private_cycle(
+        5, 100_000, torque_raw=2801,
+        engine_request=True, enable=True,
+      ),
+      (True, True, False),
+    )
+
+  def test_private_launch_torque_is_rejected_before_go(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(
+        2, 40_000, torque_raw=2100,
+        engine_request=True, enable=True,
+      ),
+      (True, True, False),
+    )
+
+  def test_private_stop_and_go_reject_above_oem_low_speed_band(self):
+    for stop, go, decel_raw, command_type in (
+      (True, False, 2866, 1),
+      (False, True, 4094, 0),
+    ):
+      self._reset_long_shadow(actuation=True)
+      self._enable_safe_source()
+      self.assertTrue(self._rx(self._speed_msg(1.0)))
+      self.assertFalse(self._tx(self._private_brake_msg(
+        0, decel_raw=decel_raw, command_type=command_type,
+        stop=stop, go=go,
+      )))
+
+  def test_private_engine_torque_requires_independent_rolling_speed(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0.5)))
+    self.assertTrue(self._tx(self._private_brake_msg(0)))
+    self.assertTrue(self._tx(self._private_dash_msg(0, enable=True)))
+    self.assertFalse(self._tx(self._private_torque_msg(
+      0, torque_raw=2100, engine_request=True,
+    )))
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0.8)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=2100, engine_request=True, enable=True,
+      ),
+      (True, True, True),
+    )
+
+  def test_private_stop_or_go_cannot_overlap_engine_torque(self):
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0.5)))
+    self.assertTrue(self._tx(self._private_brake_msg(
+      0, decel_raw=2866, command_type=1, stop=True,
+    )))
+    self.assertTrue(self._tx(self._private_dash_msg(0, enable=True)))
+    self.assertFalse(self._tx(self._private_torque_msg(
+      0, torque_raw=2100, engine_request=True,
+    )))
+
+    self._reset_long_shadow(actuation=True)
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(0.5)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, decel_raw=2866, command_type=1,
+        enable=True, stop=True,
+      ),
+      (True, True, True),
+    )
+    self.assertEqual(
+      self._tx_private_cycle(1, 20_000, enable=True),
+      (True, True, True),
+    )
+    self.safety.set_timer(40_000)
+    self.assertTrue(self._tx(self._private_brake_msg(2, go=True)))
+    self.assertTrue(self._tx(self._private_dash_msg(2, enable=True)))
+    self.assertFalse(self._tx(self._private_torque_msg(
+      2, torque_raw=2100, engine_request=True,
+    )))
+
   def test_private_torque_payload_and_exclusivity(self):
     invalid_torque = (
       self._private_torque_msg(
-        0, torque_raw=3701, engine_request=True,
+        0, torque_raw=4001, engine_request=True,
       ),
       self._private_torque_msg(
         0, torque_raw=2001, engine_request=False,

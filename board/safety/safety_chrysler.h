@@ -55,9 +55,14 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_DECEL_MAX_RAW 3275
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-// b6m synchronized OEM/planner samples reached 422.25 Nm. The private DAS_3
-// scaling is raw * 0.25 - 500 Nm, so 3700 is the independent 425 Nm ceiling.
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 3700
+// A stock-ACC uphill capture sustained 503.25 Nm median and reached 535.5 Nm
+// with both pedals released. The private DAS_3 scaling is raw * 0.25 - 500 Nm,
+// so raw 4000 independently enforces the common 500 Nm b6s ceiling.
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
+#define CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW 11
+#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2800
+#define CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW 12
+#define CHRYSLER_LONG_LOW_GO_MAX_CYCLES 4U
 #define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US 15000U
 #define CHRYSLER_LONG_COUNTER_RESET_US 100000U
@@ -215,6 +220,11 @@ static uint8_t chrysler_long_cycle_counter = 0U;
 static uint8_t chrysler_long_last_counter = 0U;
 static bool chrysler_long_counter_seen = false;
 static bool chrysler_long_brake_active = false;
+static bool chrysler_long_cycle_stop = false;
+static bool chrysler_long_cycle_go = false;
+static int chrysler_long_vehicle_speed_raw = 0;
+static uint8_t chrysler_long_low_speed_state = 0U;
+static uint8_t chrysler_long_low_speed_go_cycles = 0U;
 static uint32_t chrysler_long_last_cycle_ts = 0U;
 static bool chrysler_b6y_hold_active = false;
 static uint32_t chrysler_b6y_hold_last_ts = 0U;
@@ -253,7 +263,99 @@ typedef enum {
   CHRYSLER_LONG_REJECT_TORQUE_CHECKSUM = 30U,
   CHRYSLER_LONG_REJECT_TORQUE_PAYLOAD = 31U,
   CHRYSLER_LONG_REJECT_TORQUE_CONFLICT = 32U,
+  CHRYSLER_LONG_REJECT_LOW_SPEED_SEQUENCE = 33U,
 } ChryslerLongRejectReason;
+
+typedef enum {
+  CHRYSLER_LONG_LOW_DRIVE = 0U,
+  CHRYSLER_LONG_LOW_HOLD = 1U,
+  CHRYSLER_LONG_LOW_RELEASE = 2U,
+  CHRYSLER_LONG_LOW_GO = 3U,
+  CHRYSLER_LONG_LOW_CREEP = 4U,
+} ChryslerLongLowSpeedState;
+
+static bool chrysler_long_low_speed_transition(
+    const uint8_t current_state,
+    const uint8_t current_go_cycles,
+    const bool stop_request,
+    const bool go_request,
+    const bool brake_request,
+    const bool engine_request,
+    uint8_t *next_state,
+    uint8_t *next_go_cycles) {
+  uint8_t state = current_state;
+  uint8_t go_cycles = current_go_cycles;
+
+  if (chrysler_long_vehicle_speed_raw >
+      CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW) {
+    state = CHRYSLER_LONG_LOW_DRIVE;
+    go_cycles = 0U;
+  } else if (engine_request) {
+    // The complete factory capture applies bounded engine torque immediately
+    // after GO, before wheel speed reaches 0.78 m/s. Admit that one case only
+    // from CREEP; ordinary low-speed DRIVE cannot create launch torque.
+    if (stop_request || go_request || brake_request) {
+      return false;
+    }
+    if (chrysler_long_vehicle_speed_raw >=
+        CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) {
+      state = CHRYSLER_LONG_LOW_DRIVE;
+      go_cycles = 0U;
+    } else if (current_state != CHRYSLER_LONG_LOW_CREEP) {
+      return false;
+    }
+  } else if (stop_request && brake_request && !go_request) {
+    state = CHRYSLER_LONG_LOW_HOLD;
+    go_cycles = 0U;
+  } else if (current_state == CHRYSLER_LONG_LOW_DRIVE) {
+    if (go_request) {
+      return false;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_HOLD) {
+    if (go_request) {
+      return false;
+    }
+    // A decaying brake command is still HOLD. Require one complete neutral
+    // private cycle before the subsequent GO cycle can be accepted.
+    if (!brake_request && !engine_request) {
+      state = CHRYSLER_LONG_LOW_RELEASE;
+      go_cycles = 0U;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_RELEASE) {
+    if (brake_request) {
+      state = CHRYSLER_LONG_LOW_HOLD;
+      go_cycles = 0U;
+    }
+    if (go_request) {
+      if (brake_request || engine_request) {
+        return false;
+      }
+      state = CHRYSLER_LONG_LOW_GO;
+      go_cycles = 1U;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_GO) {
+    if (go_request) {
+      if (brake_request || engine_request ||
+          (current_go_cycles >= CHRYSLER_LONG_LOW_GO_MAX_CYCLES)) {
+        return false;
+      }
+      go_cycles = current_go_cycles + 1U;
+    } else {
+      state = CHRYSLER_LONG_LOW_CREEP;
+      go_cycles = 0U;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_CREEP) {
+    if (go_request) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
+  *next_state = state;
+  *next_go_cycles = go_cycles;
+  return true;
+}
 
 static void chrysler_long_set_reject(const uint8_t reason,
                                      const uint32_t detail) {
@@ -352,8 +454,6 @@ static uint8_t chrysler_long_source_reject_reason(uint32_t *detail) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
   } else if (!acc_main_on) {
     reason = CHRYSLER_LONG_REJECT_ACC_MAIN;
-  } else if (!vehicle_moving) {
-    reason = CHRYSLER_LONG_REJECT_STOPPED;
   } else if (gas_pressed) {
     reason = CHRYSLER_LONG_REJECT_GAS;
   } else if (brake_pressed) {
@@ -389,6 +489,8 @@ static uint8_t chrysler_long_source_reject_reason(uint32_t *detail) {
 static void chrysler_long_reset_pending(void) {
   chrysler_long_stage = 0U;
   chrysler_long_brake_active = false;
+  chrysler_long_cycle_stop = false;
+  chrysler_long_cycle_go = false;
 }
 
 static bool chrysler_long_checksum_valid(const CANPacket_t *to_send) {
@@ -414,30 +516,53 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
   const int decel_raw = ((GET_BYTE(to_send, 2) & 0xFU) << 8) |
                         GET_BYTE(to_send, 3);
   const int command_type = (GET_BYTE(to_send, 4) >> 4) & 0x7U;
+  const bool stop_request = GET_BIT(to_send, 5U);
+  const bool go_request = GET_BIT(to_send, 6U);
   const bool acc_available_cmd = GET_BIT(to_send, 20U);
   const bool acc_enabled_cmd = GET_BIT(to_send, 21U);
   const bool brake_fields_valid =
-    (GET_BYTE(to_send, 0) == 0U) &&
+    ((GET_BYTE(to_send, 0) & 0x9FU) == 0U) &&
     (GET_BYTE(to_send, 1) == 0U) &&
     ((GET_BYTE(to_send, 2) & 0xC0U) == 0U) &&
     ((GET_BYTE(to_send, 4) & 0x8FU) == 0U) &&
     (GET_BYTE(to_send, 5) == 0U) &&
     ((GET_BYTE(to_send, 6) & 0xFU) == 0U) &&
-    acc_available_cmd && acc_enabled_cmd;
+    acc_available_cmd && acc_enabled_cmd &&
+    !(stop_request && go_request);
   bool command_valid = false;
   if (command_type == 1) {
     command_valid =
+      !go_request &&
+      (!stop_request ||
+       (chrysler_long_vehicle_speed_raw <=
+        CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW)) &&
       (decel_raw >= CHRYSLER_LONG_DECEL_MIN_RAW) &&
       (decel_raw <= CHRYSLER_LONG_DECEL_MAX_RAW);
   } else {
     command_valid =
       (command_type == 0) &&
+      !stop_request &&
+      (!go_request ||
+       (chrysler_long_vehicle_speed_raw <=
+        CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW)) &&
       (decel_raw == CHRYSLER_LONG_DECEL_INACTIVE_RAW);
   }
+  uint8_t precheck_low_speed_state = chrysler_long_low_speed_state;
+  uint8_t precheck_low_speed_go_cycles = chrysler_long_low_speed_go_cycles;
+  const bool low_speed_sequence_valid =
+    chrysler_long_low_speed_transition(
+      chrysler_long_low_speed_state,
+      chrysler_long_low_speed_go_cycles,
+      stop_request,
+      go_request,
+      command_type == 1,
+      false,
+      &precheck_low_speed_state,
+      &precheck_low_speed_go_cycles);
 
   bool allowed = shadow_valid && platform_valid && stage_valid &&
                  source_valid && checksum_valid && brake_fields_valid &&
-                 command_valid;
+                 command_valid && low_speed_sequence_valid;
   const uint32_t now = microsecond_timer_get();
   uint32_t elapsed = 0U;
   bool interval_valid = true;
@@ -457,6 +582,8 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
     chrysler_long_last_counter = (uint8_t)counter;
     chrysler_long_counter_seen = true;
     chrysler_long_brake_active = command_type == 1;
+    chrysler_long_cycle_stop = stop_request;
+    chrysler_long_cycle_go = go_request;
     chrysler_long_last_cycle_ts = now;
     chrysler_long_stage = 1U;
   } else {
@@ -477,6 +604,11 @@ static bool chrysler_long_brake_tx_allowed(const CANPacket_t *to_send) {
     } else if (!command_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_BRAKE_COMMAND,
                                (uint32_t)decel_raw);
+    } else if (!low_speed_sequence_valid) {
+      chrysler_long_set_reject(
+        CHRYSLER_LONG_REJECT_LOW_SPEED_SEQUENCE,
+        ((uint32_t)chrysler_long_low_speed_state << 8U) |
+        (uint32_t)chrysler_long_low_speed_go_cycles);
     } else if (!interval_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_INTERVAL, elapsed);
       // The frame remains blocked, but retain its valid input counter so an
@@ -566,22 +698,48 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
     (GET_BYTE(to_send, 3) == 0U) &&
     ((GET_BYTE(to_send, 6) & 0xFU) == 0U);
   const bool conflict_valid =
-    !(chrysler_long_brake_active && engine_request);
+    !(chrysler_long_brake_active && engine_request) &&
+    !(engine_request &&
+      (chrysler_long_cycle_stop || chrysler_long_cycle_go));
+  uint8_t next_low_speed_state = chrysler_long_low_speed_state;
+  uint8_t next_low_speed_go_cycles = chrysler_long_low_speed_go_cycles;
+  const bool low_speed_transition_valid =
+    chrysler_long_low_speed_transition(
+      chrysler_long_low_speed_state,
+      chrysler_long_low_speed_go_cycles,
+      chrysler_long_cycle_stop,
+      chrysler_long_cycle_go,
+      chrysler_long_brake_active,
+      engine_request,
+      &next_low_speed_state,
+      &next_low_speed_go_cycles);
 
   bool command_valid = false;
   if (engine_request) {
+    const bool running_torque_valid =
+      (chrysler_long_vehicle_speed_raw >=
+       CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
+      (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+    const bool launch_torque_valid =
+      (chrysler_long_vehicle_speed_raw <
+       CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
+      (chrysler_long_low_speed_state == CHRYSLER_LONG_LOW_CREEP) &&
+      (torque_raw <= CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW);
     command_valid =
       (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW) &&
-      (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+      (running_torque_valid || launch_torque_valid);
   } else {
     command_valid = torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW;
   }
   const bool allowed = shadow_valid && stage_valid && counter_valid &&
                        checksum_valid && source_valid && payload_valid &&
-                       conflict_valid &&
+                       conflict_valid && low_speed_transition_valid &&
                        command_valid;
 
-  if (!allowed) {
+  if (allowed) {
+    chrysler_long_low_speed_state = next_low_speed_state;
+    chrysler_long_low_speed_go_cycles = next_low_speed_go_cycles;
+  } else {
     if (!shadow_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_SHADOW_DISABLED, 0U);
     } else if (!stage_valid) {
@@ -600,6 +758,11 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
                                (uint32_t)torque_raw);
     } else if (!conflict_valid) {
       chrysler_long_set_reject(CHRYSLER_LONG_REJECT_TORQUE_CONFLICT, 0U);
+    } else if (!low_speed_transition_valid) {
+      chrysler_long_set_reject(
+        CHRYSLER_LONG_REJECT_LOW_SPEED_SEQUENCE,
+        ((uint32_t)chrysler_long_low_speed_state << 8U) |
+        (uint32_t)chrysler_long_low_speed_go_cycles);
     } else {
     }
   }
@@ -650,6 +813,7 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
   if ((chrysler_platform == CHRYSLER_PACIFICA) && (bus == 0) && (addr == 514)) {
     int speed_l = (GET_BYTE(to_push, 0) << 4) + (GET_BYTE(to_push, 1) >> 4);
     int speed_r = (GET_BYTE(to_push, 2) << 4) + (GET_BYTE(to_push, 3) >> 4);
+    chrysler_long_vehicle_speed_raw = (speed_l + speed_r) / 2;
     vehicle_moving = (speed_l != 0) || (speed_r != 0);
     chrysler_long_speed_ts = microsecond_timer_get();
     chrysler_long_speed_seen = true;
@@ -815,6 +979,9 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_long_last_counter = 0U;
   chrysler_long_cycle_counter = 0U;
   chrysler_long_last_cycle_ts = 0U;
+  chrysler_long_vehicle_speed_raw = 0;
+  chrysler_long_low_speed_state = CHRYSLER_LONG_LOW_DRIVE;
+  chrysler_long_low_speed_go_cycles = 0U;
   chrysler_b6y_hold_last_ts = 0U;
   chrysler_b6y_hold_clear();
   chrysler_long_reset_pending();
