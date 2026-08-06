@@ -20,6 +20,7 @@
 #define CHRYSLER_LONG_GAS_PEDAL_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US 100000U
+#define CHRYSLER_LONG_DASHBOARD_TIMEOUT_US 100000U
 // Route 28 showed valid factory-cancel acknowledgements straddling the old
 // 300 ms limit (0.299-0.322 s). Canceling still passes factory DAS_3 unchanged
 // and cannot actuate openpilot commands, so allow bounded scheduling margin.
@@ -40,11 +41,12 @@
 #define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094   // stock no-brake sentinel
 
-// A stock-ACC uphill capture sustained 503.25 Nm median and reached 535.5 Nm
-// with both pedals released. The private DAS_3 scaling is raw * 0.25 - 500 Nm,
-// so raw 4000 independently enforces the common 500 Nm b6s ceiling.
+// b6v asserted the DAS_4 dashboard fault while a 500 Nm request was saturated,
+// while an earlier 439.25 Nm peak remained fault-free. The private DAS_3
+// scaling is raw * 0.25 - 500 Nm, so raw 3760 independently enforces b6w's
+// common 440 Nm ceiling.
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 3760
 
 // SPEED_1 raw * 0.071028 m/s. Running torque uses the independently measured
 // raw-11 threshold. The complete capture also showed a bounded engine request
@@ -165,6 +167,22 @@ static inline uint32_t chrysler_long_owner_diagnostic_word(
 static inline bool chrysler_long_is_fresh(const uint32_t now, const uint32_t last,
                                           const bool valid, const uint32_t timeout_us) {
   return valid && ((uint32_t)(now - last) <= timeout_us);
+}
+
+static inline bool chrysler_long_dashboard_ready(
+    const uint32_t now,
+    const uint32_t last,
+    const bool frame_valid,
+    const bool dashboard_fault) {
+  return chrysler_long_is_fresh(
+           now, last, frame_valid, CHRYSLER_LONG_DASHBOARD_TIMEOUT_US) &&
+         !dashboard_fault;
+}
+
+static inline bool chrysler_long_dashboard_fault_from_byte6(
+    const uint8_t byte6) {
+  // DAS_4 ACC_FAULTED is DBC bit 50: byte 6, mask 0x04.
+  return (byte6 & 0x04U) != 0U;
 }
 
 static inline bool chrysler_long_counter_step_valid(bool *seen, int *last,

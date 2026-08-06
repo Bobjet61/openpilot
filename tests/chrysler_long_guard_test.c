@@ -12,6 +12,14 @@ static bool valid_brake_command(void) {
 
 
 int main(void) {
+  assert(chrysler_long_dashboard_ready(100000U, 1U, true, false));
+  assert(!chrysler_long_dashboard_ready(100002U, 1U, true, false));
+  assert(!chrysler_long_dashboard_ready(100000U, 1U, false, false));
+  assert(!chrysler_long_dashboard_ready(100000U, 1U, true, true));
+  assert(!chrysler_long_dashboard_fault_from_byte6(0x00U));
+  assert(chrysler_long_dashboard_fault_from_byte6(0x04U));
+  assert(chrysler_long_dashboard_fault_from_byte6(0xFFU));
+
   assert(CHRYSLER_LONG_ACTUATION == 1U);
 
   // Diagnostic packing preserves the two raw factory DAS_3 words and the

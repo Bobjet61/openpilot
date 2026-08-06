@@ -19,6 +19,8 @@ static bool chrysler_long_speed_valid = false;
 static bool chrysler_long_gas_pedal_valid = false;
 static bool chrysler_long_brake_pedal_valid = false;
 static bool chrysler_long_stock_acc_valid = false;
+static bool chrysler_long_dashboard_valid = false;
+static bool chrysler_long_dashboard_fault = false;
 static bool chrysler_long_cancel_injected = false;
 static bool chrysler_long_owner_diag_stock_valid = false;
 static bool chrysler_long_owner_diag_stock_available = false;
@@ -41,6 +43,7 @@ static uint32_t chrysler_long_last_speed_ts = 0U;
 static uint32_t chrysler_long_last_gas_pedal_ts = 0U;
 static uint32_t chrysler_long_last_brake_pedal_ts = 0U;
 static uint32_t chrysler_long_last_stock_acc_ts = 0U;
+static uint32_t chrysler_long_last_dashboard_ts = 0U;
 static uint32_t chrysler_long_cancel_start_ts = 0U;
 static int chrysler_long_brake_counter = 0;
 static int chrysler_long_dash_counter = 0;
@@ -106,7 +109,10 @@ static void chrysler_long_try_commit_staged_cycle(const uint32_t now) {
       CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US) &&
     chrysler_long_is_fresh(
       now, chrysler_long_last_stock_acc_ts, chrysler_long_stock_acc_valid,
-      CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US);
+      CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US) &&
+    chrysler_long_dashboard_ready(
+      now, chrysler_long_last_dashboard_ts, chrysler_long_dashboard_valid,
+      chrysler_long_dashboard_fault);
   const bool staged_commands_valid = chrysler_long_commands_valid(
     chrysler_long_staged_host_requested,
     chrysler_long_staged_acc_available,
@@ -189,7 +195,14 @@ static void chrysler_long_update_guard(void) {
   const bool stock_acc_fresh =
     chrysler_long_is_fresh(now, chrysler_long_last_stock_acc_ts,
                            chrysler_long_stock_acc_valid, CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US);
-  const bool stock_acc_ready = stock_acc_fresh && org_acc_available;
+  // DAS_4 is the dashboard fault source that actually asserted in b6v. Fold
+  // its freshness and fault bit into the existing stock-ACC readiness gate so
+  // the diagnostic layout remains stable while the actuation gate tightens.
+  const bool dashboard_ready = chrysler_long_dashboard_ready(
+    now, chrysler_long_last_dashboard_ts, chrysler_long_dashboard_valid,
+    chrysler_long_dashboard_fault);
+  const bool stock_acc_ready =
+    stock_acc_fresh && dashboard_ready && org_acc_available;
   const bool counters_aligned = chrysler_long_committed_valid;
   const bool private_integrity_valid = chrysler_long_committed_valid;
   const bool messages_fresh =
@@ -385,18 +398,24 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     stock_counter,
     GET_LEN(to_fwd),
     stock_checksum_valid);
+  const bool dashboard_ready = chrysler_long_dashboard_ready(
+    TIM2->CNT, chrysler_long_last_dashboard_ts,
+    chrysler_long_dashboard_valid, chrysler_long_dashboard_fault);
+  const bool guarded_stock_valid = current_stock_valid && dashboard_ready;
+  const int combined_stock_fault =
+    stock_fault | (chrysler_long_dashboard_fault ? 1 : 0);
 
-  chrysler_long_owner_diag_stock_valid = current_stock_valid;
+  chrysler_long_owner_diag_stock_valid = guarded_stock_valid;
   chrysler_long_owner_diag_stock_available = stock_available;
   chrysler_long_owner_diag_stock_active = stock_active;
-  chrysler_long_owner_diag_stock_fault = stock_fault;
+  chrysler_long_owner_diag_stock_fault = combined_stock_fault;
   chrysler_long_owner_diag_stock_collision = stock_collision;
 
   const uint8_t previous_owner_state = chrysler_long_owner_state;
   const bool valid_inactive_candidate =
     (chrysler_long_owner_state == CHRYSLER_LONG_OWNER_OFF) &&
-    is_oplong_enabled && current_stock_valid && stock_available &&
-    !stock_active && (stock_fault == 0) && !stock_collision;
+    is_oplong_enabled && guarded_stock_valid && stock_available &&
+    !stock_active && (combined_stock_fault == 0) && !stock_collision;
   chrysler_long_inactive_confirm_frames =
     chrysler_long_update_inactive_confirmation(
       chrysler_long_inactive_confirm_frames, valid_inactive_candidate);
@@ -404,9 +423,10 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     chrysler_long_inactive_confirmation_complete(
       chrysler_long_inactive_confirm_frames);
   chrysler_long_owner_state = chrysler_long_next_owner_state(
-    chrysler_long_owner_state, is_oplong_enabled, current_stock_valid,
+    chrysler_long_owner_state, is_oplong_enabled, guarded_stock_valid,
     stock_available,
-    stock_active, stock_inactive_confirmed, stock_fault, stock_collision);
+    stock_active, stock_inactive_confirmed, combined_stock_fault,
+    stock_collision);
   if (chrysler_long_owner_state != CHRYSLER_LONG_OWNER_OFF) {
     chrysler_long_inactive_confirm_frames = 0U;
   }
@@ -421,8 +441,8 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     chrysler_long_cancel_injected = false;
   }
   const bool applied = chrysler_long_should_substitute_das3(
-    chrysler_long_owner_state, is_oplong_enabled, current_stock_valid,
-    stock_fault,
+    chrysler_long_owner_state, is_oplong_enabled, guarded_stock_valid,
+    combined_stock_fault,
     stock_collision, stock_available, stock_active);
   chrysler_long_diag_status =
     CHRYSLER_LONG_DIAG_SIGNATURE |
@@ -469,7 +489,17 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
 
 static void send_acc_dash_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   // The private 0x1F7 carries only the host enable plus protocol integrity.
-  // Factory DAS_4 dashboard state is never replaced.
+  // Factory DAS_4 dashboard state is never replaced. Observe its native fault
+  // bit before forwarding, and revoke the committed command immediately when
+  // the frame is malformed or the dashboard reports an ACC/FCW fault.
+  chrysler_long_dashboard_valid = GET_LEN(to_fwd) == 8;
+  chrysler_long_dashboard_fault =
+    !chrysler_long_dashboard_valid ||
+    chrysler_long_dashboard_fault_from_byte6(GET_BYTE(to_fwd, 6));
+  chrysler_long_last_dashboard_ts = TIM2->CNT;
+  if (chrysler_long_dashboard_fault) {
+    chrysler_long_invalidate_committed_cycle();
+  }
   chrysler_long_update_guard();
   to_fwd->RDLR |= 0x00000000U;
   to_fwd->RDHR |= 0x00000000U;
