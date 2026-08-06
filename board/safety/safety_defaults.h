@@ -19,6 +19,11 @@ static bool chrysler_long_speed_valid = false;
 static bool chrysler_long_gas_pedal_valid = false;
 static bool chrysler_long_brake_pedal_valid = false;
 static bool chrysler_long_stock_acc_valid = false;
+static bool chrysler_long_cancel_injected = false;
+static bool chrysler_long_owner_diag_stock_valid = false;
+static bool chrysler_long_owner_diag_stock_available = false;
+static bool chrysler_long_owner_diag_stock_active = false;
+static bool chrysler_long_owner_diag_stock_collision = false;
 static bool chrysler_steering_stock_counter_seen = false;
 static bool chrysler_long_committed_valid = false;
 static bool chrysler_long_staged_host_requested = false;
@@ -36,6 +41,7 @@ static uint32_t chrysler_long_last_speed_ts = 0U;
 static uint32_t chrysler_long_last_gas_pedal_ts = 0U;
 static uint32_t chrysler_long_last_brake_pedal_ts = 0U;
 static uint32_t chrysler_long_last_stock_acc_ts = 0U;
+static uint32_t chrysler_long_cancel_start_ts = 0U;
 static int chrysler_long_brake_counter = 0;
 static int chrysler_long_dash_counter = 0;
 static int chrysler_long_torque_counter = 0;
@@ -46,6 +52,11 @@ static int chrysler_long_staged_engine_torque_raw = CHRYSLER_LONG_TORQUE_ZERO_RA
 static int chrysler_long_committed_counter = 0;
 static int chrysler_steering_stock_counter = 0;
 static int chrysler_steering_stock_source_bus = -1;
+static int chrysler_long_stock_acc_fault = 0;
+static int chrysler_long_owner_diag_stock_fault = 0;
+static uint8_t chrysler_long_owner_state = CHRYSLER_LONG_OWNER_OFF;
+static uint8_t chrysler_long_low_speed_state = CHRYSLER_LONG_LOW_DRIVE;
+static uint8_t chrysler_long_low_speed_go_cycles = 0U;
 static uint16_t chrysler_long_guard_failure_mask = 0xFFFFU;
 static uint8_t chrysler_long_diag_status = CHRYSLER_LONG_DIAG_SIGNATURE;
 static uint16_t chrysler_long_diag_failure_mask = 0xFFFFU;
@@ -65,6 +76,11 @@ static void chrysler_steering_update_guard(void) {
 
 static void chrysler_long_invalidate_committed_cycle(void) {
   chrysler_long_committed_valid = false;
+  chrysler_long_owner_state = CHRYSLER_LONG_OWNER_OFF;
+  chrysler_long_cancel_injected = false;
+  chrysler_long_cancel_start_ts = 0U;
+  chrysler_long_low_speed_state = CHRYSLER_LONG_LOW_DRIVE;
+  chrysler_long_low_speed_go_cycles = 0U;
 }
 
 static void chrysler_long_try_commit_staged_cycle(const uint32_t now) {
@@ -103,8 +119,23 @@ static void chrysler_long_try_commit_staged_cycle(const uint32_t now) {
     chrysler_long_vehicle_speed_raw,
     chrysler_long_driver_brake,
     chrysler_long_driver_gas,
-    org_collision_active);
-  if (!context_fresh || !org_acc_available || !staged_commands_valid) {
+    org_collision_active,
+    chrysler_long_low_speed_state);
+  uint8_t next_low_speed_state = chrysler_long_low_speed_state;
+  uint8_t next_low_speed_go_cycles = chrysler_long_low_speed_go_cycles;
+  const bool low_speed_transition_valid =
+    chrysler_long_low_speed_transition(
+      chrysler_long_low_speed_state,
+      chrysler_long_low_speed_go_cycles,
+      chrysler_long_staged_acc_stop,
+      chrysler_long_staged_acc_go,
+      chrysler_long_staged_command_type,
+      chrysler_long_staged_engine_torque_request_max,
+      chrysler_long_vehicle_speed_raw,
+      &next_low_speed_state,
+      &next_low_speed_go_cycles);
+  if (!context_fresh || !org_acc_available || !staged_commands_valid ||
+      !low_speed_transition_valid) {
     // A complete but unsafe cycle supersedes the old command with a fail-off
     // decision; it must never leave the prior actuation snapshot armed.
     chrysler_long_invalidate_committed_cycle();
@@ -125,6 +156,8 @@ static void chrysler_long_try_commit_staged_cycle(const uint32_t now) {
   engine_torque_request_max =
     chrysler_long_staged_engine_torque_request_max;
   engine_torque_raw = chrysler_long_staged_engine_torque_raw;
+  chrysler_long_low_speed_state = next_low_speed_state;
+  chrysler_long_low_speed_go_cycles = next_low_speed_go_cycles;
   chrysler_long_committed_counter = chrysler_long_brake_counter;
   chrysler_long_last_commit_ts = now;
   chrysler_long_committed_valid = true;
@@ -182,7 +215,8 @@ static void chrysler_long_update_guard(void) {
     chrysler_long_vehicle_speed_raw,
     chrysler_long_driver_brake,
     chrysler_long_driver_gas,
-    org_collision_active);
+    org_collision_active,
+    chrysler_long_low_speed_state);
 
   chrysler_long_guard_failure_mask = chrysler_long_diagnostic_mask(
     CHRYSLER_LONG_ACTUATION != 0U,
@@ -196,7 +230,9 @@ static void chrysler_long_update_guard(void) {
     stock_acc_ready,
     counters_aligned,
     private_integrity_valid,
-    chrysler_long_vehicle_speed_raw >= CHRYSLER_LONG_MOVING_SPEED_MIN_RAW,
+    chrysler_long_speed_valid_for_command(
+      acc_stop, acc_go, command_type, engine_torque_request_max,
+      chrysler_long_vehicle_speed_raw, chrysler_long_low_speed_state),
     chrysler_long_driver_brake,
     chrysler_long_driver_gas,
     org_collision_active,
@@ -329,13 +365,50 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     (uint16_t)((to_fwd->RDLR >> 16) & 0xFFFFU);
   chrysler_long_update_guard();
 
-  // Use the command type from this exact stock frame so a factory braking
-  // request is passed through without waiting for any later state update.
+  // Use every ownership-relevant field from this exact stock frame. The
+  // forwarding path runs before rx_hook updates the cached stock state.
+  const bool stock_available = (GET_BYTE(to_fwd, 2) >> 4) & 0x1;
+  const bool stock_active = (GET_BYTE(to_fwd, 2) >> 5) & 0x1;
   const int stock_command_type = (GET_BYTE(to_fwd, 4) >> 4) & 0x7;
-  const bool applied = chrysler_long_should_substitute_das3(
-    is_oplong_enabled, org_collision_active, stock_command_type,
-    command_type);
+  const int stock_fault = (GET_BYTE(to_fwd, 5) >> 6) & 0x3;
+  const bool stock_collision =
+    (GET_BYTE(to_fwd, 6) & 0x1) || (stock_command_type > 1);
   const int stock_counter = (GET_BYTE(to_fwd, 6) >> 4) & 0xF;
+  const bool stock_checksum_valid =
+    (GET_LEN(to_fwd) == 8) &&
+    (GET_BYTE(to_fwd, 7) == fca_compute_checksum(to_fwd));
+  const bool current_stock_valid = chrysler_long_current_stock_frame_valid(
+    chrysler_steering_stock_counter_seen,
+    chrysler_steering_stock_counter,
+    stock_counter,
+    GET_LEN(to_fwd),
+    stock_checksum_valid);
+
+  chrysler_long_owner_diag_stock_valid = current_stock_valid;
+  chrysler_long_owner_diag_stock_available = stock_available;
+  chrysler_long_owner_diag_stock_active = stock_active;
+  chrysler_long_owner_diag_stock_fault = stock_fault;
+  chrysler_long_owner_diag_stock_collision = stock_collision;
+
+  const uint8_t previous_owner_state = chrysler_long_owner_state;
+  chrysler_long_owner_state = chrysler_long_next_owner_state(
+    chrysler_long_owner_state, is_oplong_enabled, current_stock_valid,
+    stock_available,
+    stock_active, stock_fault, stock_collision);
+  if ((chrysler_long_owner_state == CHRYSLER_LONG_OWNER_CANCELING) &&
+      (previous_owner_state != CHRYSLER_LONG_OWNER_CANCELING)) {
+    chrysler_long_cancel_start_ts = TIM2->CNT;
+  }
+  if (chrysler_long_cancel_timed_out(
+      chrysler_long_owner_state, TIM2->CNT,
+      chrysler_long_cancel_start_ts)) {
+    chrysler_long_owner_state = CHRYSLER_LONG_OWNER_FAILED;
+    chrysler_long_cancel_injected = false;
+  }
+  const bool applied = chrysler_long_should_substitute_das3(
+    chrysler_long_owner_state, is_oplong_enabled, current_stock_valid,
+    stock_fault,
+    stock_collision, stock_available, stock_active);
   chrysler_long_diag_status =
     CHRYSLER_LONG_DIAG_SIGNATURE |
     (applied ? CHRYSLER_LONG_DIAG_APPLIED : 0U) |
@@ -397,10 +470,25 @@ static void send_acc_accel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
 
 static void send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   chrysler_long_update_guard();
-  // Preserve physical and host-generated 0x23B commands exactly. In
-  // particular, never synthesize the ACC-off bit when longitudinal engages.
-  to_fwd->RDLR = chrysler_long_wheel_button_passthrough(to_fwd->RDLR);
-  to_fwd->RDHR = chrysler_long_wheel_button_passthrough(to_fwd->RDHR);
+  const uint8_t original_buttons = GET_BYTE(to_fwd, 0);
+  // Physical or host-generated Cancel and ACC main presses revoke ownership
+  // before the next DAS_3 frame can be modified.
+  if ((original_buttons & 0x01U) || (original_buttons & 0xC0U)) {
+    chrysler_long_invalidate_committed_cycle();
+  }
+  const uint8_t filtered_buttons = chrysler_long_filter_button_byte(
+    original_buttons, chrysler_long_owner_state);
+  chrysler_long_cancel_injected =
+    (chrysler_long_owner_state == CHRYSLER_LONG_OWNER_CANCELING) &&
+    ((original_buttons & 0x01U) == 0U) &&
+    ((filtered_buttons & 0x01U) != 0U);
+  to_fwd->RDLR &= ~0xFFU;
+  to_fwd->RDLR |= filtered_buttons;
+  // CRUISE_BUTTONS is three bytes: retain its counter in byte 1 and rebuild
+  // byte 2 after changing byte 0.
+  to_fwd->RDLR &= 0x0000FFFFU;
+  const uint8_t crc = fca_compute_checksum(to_fwd);
+  to_fwd->RDLR |= (uint32_t)crc << 16;
 }
 
 static void create_chrysler_wp_status_diagnostic(
@@ -425,6 +513,21 @@ static void create_chrysler_wp_command_diagnostic(
     chrysler_long_diag_stock_accel_word);
 }
 
+static void create_chrysler_wp_owner_diagnostic(
+    CAN_FIFOMailBox_TypeDef *to_send) {
+  to_send->RIR = (0x4FDU << 21) | 1U;
+  to_send->RDTR = 4U;
+  to_send->RDLR = chrysler_long_owner_diagnostic_word(
+    chrysler_long_owner_state,
+    chrysler_long_owner_diag_stock_valid,
+    chrysler_long_owner_diag_stock_available,
+    chrysler_long_owner_diag_stock_active,
+    chrysler_long_owner_diag_stock_fault,
+    chrysler_long_owner_diag_stock_collision,
+    chrysler_long_cancel_injected);
+  to_send->RDHR = 0U;
+}
+
 int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
   int addr = GET_ADDR(to_push);
   int bus_num = GET_BUS(to_push);
@@ -443,10 +546,6 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     chrysler_long_vehicle_speed_raw = (speed_left_raw + speed_right_raw) / 2;
     chrysler_long_last_speed_ts = TIM2->CNT;
     chrysler_long_speed_valid = true;
-    if (chrysler_long_vehicle_speed_raw <
-        CHRYSLER_LONG_MOVING_SPEED_MIN_RAW) {
-      chrysler_long_invalidate_committed_cycle();
-    }
     chrysler_long_update_guard();
   }
 
@@ -610,16 +709,19 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     if (chrysler_long_stock_acc_valid) {
       org_acc_available = (GET_BYTE(to_push, 2) >> 4) & 0x1;
       org_cmd_type = (GET_BYTE(to_push, 4) >> 4) & 0x7;
+      chrysler_long_stock_acc_fault =
+        (GET_BYTE(to_push, 5) >> 6) & 0x3;
       org_brk_pul = GET_BYTE(to_push, 6) & 0x1;
       org_collision_active = org_brk_pul || (org_cmd_type > 1);
     } else {
       // Invalid stock state must not retain a previously permissive steering
       // or longitudinal decision.
       org_acc_available = false;
+      chrysler_long_stock_acc_fault = 3;
       org_collision_active = true;
     }
     if (!chrysler_long_stock_acc_valid || !org_acc_available ||
-        org_collision_active) {
+        (chrysler_long_stock_acc_fault != 0) || org_collision_active) {
       chrysler_long_invalidate_committed_cycle();
     }
     chrysler_steering_update_guard();

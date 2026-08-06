@@ -4,9 +4,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// wp-b6n calibrated actuation build. Runtime substitution remains behind every
-// freshness, integrity, pedal, collision, speed, and command-envelope guard
-// below and cannot be enabled or altered with a compiler flag.
+// wp-b6p calibrated actuation build. Runtime substitution remains behind every
+// freshness, integrity, pedal, collision, speed, command-envelope, and
+// single-owner handoff guard below and cannot be enabled or altered with a
+// compiler flag.
 #ifdef CHRYSLER_LONG_ACTUATION
 #error "CHRYSLER_LONG_ACTUATION must not be set from the build command"
 #endif
@@ -19,6 +20,10 @@
 #define CHRYSLER_LONG_GAS_PEDAL_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US 100000U
+// Route 28 showed valid factory-cancel acknowledgements straddling the old
+// 300 ms limit (0.299-0.322 s). Canceling still passes factory DAS_3 unchanged
+// and cannot actuate openpilot commands, so allow bounded scheduling margin.
+#define CHRYSLER_LONG_CANCEL_TIMEOUT_US 800000U
 
 // The FCA DAS_3 source is isolated on physical White Panda CAN2, which the
 // firmware numbers as bus 1. Only a fresh, integrity-checked stock DAS_3 from
@@ -35,15 +40,19 @@
 #define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094   // stock no-brake sentinel
 
-// Private engine-torque command uses the stock DAS_3 scaling. b6m's matched
-// planner/factory samples reached 422.25 Nm; raw 3700 is the independent
-// 425 Nm ceiling and remains below the unrelated 547 Nm factory outlier.
+// A stock-ACC uphill capture sustained 503.25 Nm median and reached 535.5 Nm
+// with both pedals released. The private DAS_3 scaling is raw * 0.25 - 500 Nm,
+// so raw 4000 independently enforces the common 500 Nm b6s ceiling.
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 3700
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
 
-// SPEED_1 raw * 0.071028 m/s. The initial scope is moving-only and excludes
-// standstill, stop, go, brake preparation, and hold behavior.
-#define CHRYSLER_LONG_MOVING_SPEED_MIN_RAW 29  // approximately 2.06 m/s
+// SPEED_1 raw * 0.071028 m/s. Running torque uses the independently measured
+// raw-11 threshold. The complete capture also showed a bounded engine request
+// immediately after GO, so a separate 200 Nm launch ceiling is permitted only
+// from the guarded CREEP state.
+#define CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW 11  // approximately 0.78 m/s
+#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2800 // 200 Nm
+#define CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW 12 // approximately 0.85 m/s
 
 // The existing 0x4FF White Panda beacon remains four bytes long. b6h emits it
 // once per stock 50 Hz DAS_3 frame through the normal transmit queue rather
@@ -60,6 +69,26 @@
 // DAS_3 byte pairs exactly so analysis does not depend on firmware rounding.
 #define CHRYSLER_LONG_COMMAND_DIAG_SIGNATURE 0xC1U
 #define CHRYSLER_LONG_COMMAND_DIAG_VERSION 1U
+
+// A separate ownership record makes the stock-ACC handoff auditable without
+// overloading the established 0x4FE/0x4FF diagnostic layouts.
+#define CHRYSLER_LONG_OWNER_DIAG_SIGNATURE 0xD0U
+#define CHRYSLER_LONG_OWNER_OFF 0U
+#define CHRYSLER_LONG_OWNER_CANCELING 1U
+#define CHRYSLER_LONG_OWNER_OPENPILOT 2U
+#define CHRYSLER_LONG_OWNER_FAILED 3U
+#define CHRYSLER_LONG_OWNER_DIAG_STOCK_AVAILABLE (1U << 0)
+#define CHRYSLER_LONG_OWNER_DIAG_STOCK_ACTIVE (1U << 1)
+#define CHRYSLER_LONG_OWNER_DIAG_STOCK_COLLISION (1U << 2)
+#define CHRYSLER_LONG_OWNER_DIAG_CANCEL_INJECTED (1U << 3)
+#define CHRYSLER_LONG_OWNER_DIAG_STOCK_VALID (1U << 4)
+
+#define CHRYSLER_LONG_LOW_DRIVE 0U
+#define CHRYSLER_LONG_LOW_HOLD 1U
+#define CHRYSLER_LONG_LOW_RELEASE 2U
+#define CHRYSLER_LONG_LOW_GO 3U
+#define CHRYSLER_LONG_LOW_CREEP 4U
+#define CHRYSLER_LONG_LOW_GO_MAX_CYCLES 4U
 
 static inline uint32_t chrysler_long_status_diagnostic_word(
     const uint8_t status,
@@ -83,6 +112,32 @@ static inline uint32_t chrysler_long_command_diagnostic_high(
     const uint16_t stock_accel_word) {
   return (uint32_t)output_engine_word |
          (uint32_t)stock_accel_word << 16;
+}
+
+static inline uint32_t chrysler_long_owner_diagnostic_word(
+    const uint8_t owner_state,
+    const bool stock_valid,
+    const bool stock_available,
+    const bool stock_active,
+    const int stock_fault,
+    const bool stock_collision,
+    const bool cancel_injected) {
+  uint8_t stock_status = 0U;
+  stock_status |= stock_valid ?
+    CHRYSLER_LONG_OWNER_DIAG_STOCK_VALID : 0U;
+  stock_status |= stock_available ?
+    CHRYSLER_LONG_OWNER_DIAG_STOCK_AVAILABLE : 0U;
+  stock_status |= stock_active ?
+    CHRYSLER_LONG_OWNER_DIAG_STOCK_ACTIVE : 0U;
+  stock_status |= stock_collision ?
+    CHRYSLER_LONG_OWNER_DIAG_STOCK_COLLISION : 0U;
+  stock_status |= cancel_injected ?
+    CHRYSLER_LONG_OWNER_DIAG_CANCEL_INJECTED : 0U;
+
+  return (uint32_t)(CHRYSLER_LONG_OWNER_DIAG_SIGNATURE |
+                    (owner_state & 0x0FU)) |
+         (uint32_t)stock_status << 8 |
+         (uint32_t)(stock_fault & 0x3) << 16;
 }
 
 #define CHRYSLER_LONG_DIAG_ACTUATION_DISABLED (1U << 0)
@@ -138,27 +193,99 @@ static inline bool chrysler_steer_stock_das3_integrity_valid(
          (length == 8) && checksum_valid && counter_valid;
 }
 
-// Full-long keeps factory ACC-main availability as an independent permission.
-// Steering-wheel button traffic must therefore remain bit-for-bit unchanged;
-// synthesizing ACC-off here removes that permission and forces wrongCarMode.
-static inline uint32_t chrysler_long_wheel_button_passthrough(
-    const uint32_t word) {
-  return word;
+// Factory ACC must not remain an active second longitudinal controller. Start
+// by requesting a normal Cancel while factory ACC retains main availability.
+// Full substitution is permitted only after a subsequent stock DAS_3 confirms
+// that factory ACC is inactive. Any loss of host authority, factory
+// availability, or a stock fault/collision immediately drops ownership.
+static inline uint8_t chrysler_long_next_owner_state(
+    const uint8_t owner_state,
+    const bool guard_enabled,
+    const bool stock_frame_valid,
+    const bool stock_available,
+    const bool stock_active,
+    const int stock_fault,
+    const bool stock_collision) {
+  if (!guard_enabled) {
+    return CHRYSLER_LONG_OWNER_OFF;
+  }
+
+  if (owner_state == CHRYSLER_LONG_OWNER_FAILED) {
+    // Require host authority to be released before another handoff attempt.
+    return CHRYSLER_LONG_OWNER_FAILED;
+  }
+
+  if (!stock_frame_valid || !stock_available || (stock_fault != 0) ||
+      stock_collision) {
+    return CHRYSLER_LONG_OWNER_OFF;
+  }
+
+  if (owner_state == CHRYSLER_LONG_OWNER_OFF) {
+    return stock_active ?
+      CHRYSLER_LONG_OWNER_CANCELING : CHRYSLER_LONG_OWNER_OFF;
+  }
+  if (owner_state == CHRYSLER_LONG_OWNER_CANCELING) {
+    return stock_active ?
+      CHRYSLER_LONG_OWNER_CANCELING : CHRYSLER_LONG_OWNER_OPENPILOT;
+  }
+  if (owner_state == CHRYSLER_LONG_OWNER_OPENPILOT) {
+    // An unexpected factory re-engagement suspends substitution before the
+    // current frame reaches the vehicle and restarts the Cancel handshake.
+    return stock_active ?
+      CHRYSLER_LONG_OWNER_CANCELING : CHRYSLER_LONG_OWNER_OPENPILOT;
+  }
+  return CHRYSLER_LONG_OWNER_OFF;
 }
 
-// The two b6i road faults occurred when a stock brake request was replaced by
-// openpilot propulsion. Preserve that fail-closed arbitration: a stock brake
-// may be replaced only by another brake request. Openpilot may still request
-// braking while the stock frame is neutral. Collision/AEB always pass through.
+static inline bool chrysler_long_current_stock_frame_valid(
+    const bool previous_counter_seen,
+    const int previous_counter,
+    const int current_counter,
+    const int length,
+    const bool checksum_valid) {
+  return previous_counter_seen && (length == 8) && checksum_valid &&
+         (current_counter == ((previous_counter + 1) & 0xF));
+}
+
+static inline bool chrysler_long_cancel_timed_out(
+    const uint8_t owner_state,
+    const uint32_t now,
+    const uint32_t cancel_start_ts) {
+  return (owner_state == CHRYSLER_LONG_OWNER_CANCELING) &&
+         ((uint32_t)(now - cancel_start_ts) >
+          CHRYSLER_LONG_CANCEL_TIMEOUT_US);
+}
+
 static inline bool chrysler_long_should_substitute_das3(
+    const uint8_t owner_state,
     const bool guard_enabled,
+    const bool stock_frame_valid,
+    const int stock_fault,
     const bool stock_collision,
-    const int stock_command_type,
-    const int requested_command_type) {
-  return (CHRYSLER_LONG_ACTUATION != 0U) && guard_enabled &&
-         !stock_collision &&
-         ((stock_command_type == 0) ||
-          ((stock_command_type == 1) && (requested_command_type == 1)));
+    const bool stock_available,
+    const bool stock_active) {
+  return (CHRYSLER_LONG_ACTUATION != 0U) &&
+         (owner_state == CHRYSLER_LONG_OWNER_OPENPILOT) &&
+         guard_enabled && stock_frame_valid && stock_available && !stock_active &&
+         (stock_fault == 0) && !stock_collision;
+}
+
+// While canceling, request a normal ACC Cancel from the isolated factory ACC
+// source. During openpilot ownership, prevent Set/Resume and speed-adjust
+// buttons from silently reactivating the factory controller. Main and distance
+// buttons remain untouched, and a physical Cancel always passes through.
+static inline uint8_t chrysler_long_filter_button_byte(
+    const uint8_t buttons,
+    const uint8_t owner_state) {
+  if ((owner_state != CHRYSLER_LONG_OWNER_CANCELING) &&
+      (owner_state != CHRYSLER_LONG_OWNER_OPENPILOT)) {
+    return buttons;
+  }
+  uint8_t filtered = buttons & (uint8_t)~0x1CU;
+  if (owner_state == CHRYSLER_LONG_OWNER_CANCELING) {
+    filtered |= 0x01U;
+  }
+  return filtered;
 }
 
 static inline bool chrysler_long_counters_aligned(
@@ -195,31 +322,147 @@ static inline bool chrysler_long_commands_valid(
     const int speed_raw,
     const bool driver_brake,
     const bool driver_gas,
-    const bool stock_collision) {
+    const bool stock_collision,
+    const uint8_t low_speed_state) {
   bool valid = host_requested && acc_available_cmd && acc_enabled_cmd &&
                !driver_brake && !driver_gas && !stock_collision;
 
-  valid = valid && !acc_stop_cmd && !acc_go_cmd;
-  valid = valid && (speed_raw >= CHRYSLER_LONG_MOVING_SPEED_MIN_RAW);
+  valid = valid && !(acc_stop_cmd && acc_go_cmd);
   valid = valid && (command_type_cmd >= 0) && (command_type_cmd <= 1);
 
   if (command_type_cmd == 1) {
     valid = valid && !engine_request_cmd;
     valid = valid && !brake_prep_cmd;
+    valid = valid && !acc_go_cmd;
+    valid = valid && (!acc_stop_cmd ||
+                      (speed_raw <= CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW));
     valid = valid && (decel_raw >= CHRYSLER_LONG_DECEL_MIN_RAW);
     valid = valid && (decel_raw <= CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW);
   } else {
     valid = valid && !brake_prep_cmd;
     valid = valid && (decel_raw == CHRYSLER_LONG_DECEL_INACTIVE_RAW);
     if (engine_request_cmd) {
+      valid = valid && !acc_stop_cmd && !acc_go_cmd;
       valid = valid && (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW);
-      valid = valid && (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+      const bool running_torque_valid =
+        (speed_raw >= CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
+        (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+      const bool launch_torque_valid =
+        (speed_raw < CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
+        (low_speed_state == CHRYSLER_LONG_LOW_CREEP) &&
+        (torque_raw <= CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW);
+      valid = valid && (running_torque_valid || launch_torque_valid);
     } else {
+      valid = valid && !acc_stop_cmd;
+      valid = valid && (!acc_go_cmd ||
+                        (speed_raw <= CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW));
       valid = valid && (torque_raw == CHRYSLER_LONG_TORQUE_ZERO_RAW);
     }
   }
 
   return valid;
+}
+
+static inline bool chrysler_long_speed_valid_for_command(
+    const bool acc_stop_cmd,
+    const bool acc_go_cmd,
+    const int command_type_cmd,
+    const bool engine_request_cmd,
+    const int speed_raw,
+    const uint8_t low_speed_state) {
+  if (acc_stop_cmd || acc_go_cmd) {
+    return speed_raw <= CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW;
+  }
+  if ((command_type_cmd == 0) && engine_request_cmd) {
+    return (speed_raw >= CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) ||
+           (low_speed_state == CHRYSLER_LONG_LOW_CREEP);
+  }
+  return true;
+}
+
+// Independently enforce the order observed in the OEM stop/go capture. A GO
+// request is accepted only after a stopped brake hold and at least one release
+// cycle. It is bounded to four private 25 Hz cycles (160 ms maximum), cannot be
+// repeated from creep, and never overlaps a brake or engine request.
+static inline bool chrysler_long_low_speed_transition(
+    const uint8_t current_state,
+    const uint8_t current_go_cycles,
+    const bool acc_stop_cmd,
+    const bool acc_go_cmd,
+    const int command_type_cmd,
+    const bool engine_request_cmd,
+    const int speed_raw,
+    uint8_t *next_state,
+    uint8_t *next_go_cycles) {
+  uint8_t state = current_state;
+  uint8_t go_cycles = current_go_cycles;
+  const bool brake_request = command_type_cmd == 1;
+
+  if (speed_raw > CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW) {
+    state = CHRYSLER_LONG_LOW_DRIVE;
+    go_cycles = 0U;
+  } else if (engine_request_cmd) {
+    if (acc_stop_cmd || acc_go_cmd || brake_request) {
+      return false;
+    }
+    if (speed_raw >= CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) {
+      state = CHRYSLER_LONG_LOW_DRIVE;
+      go_cycles = 0U;
+    } else if (current_state != CHRYSLER_LONG_LOW_CREEP) {
+      return false;
+    }
+  } else if (acc_stop_cmd && brake_request && !acc_go_cmd) {
+    state = CHRYSLER_LONG_LOW_HOLD;
+    go_cycles = 0U;
+  } else if (current_state == CHRYSLER_LONG_LOW_DRIVE) {
+    if (acc_go_cmd) {
+      return false;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_HOLD) {
+    if (acc_go_cmd) {
+      return false;
+    }
+    // Residual braking during the host's release ramp does not count as a
+    // released cycle. Stay latched in HOLD until one complete neutral private
+    // snapshot has been committed.
+    if (!brake_request && !engine_request_cmd) {
+      state = CHRYSLER_LONG_LOW_RELEASE;
+      go_cycles = 0U;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_RELEASE) {
+    if (brake_request) {
+      state = CHRYSLER_LONG_LOW_HOLD;
+      go_cycles = 0U;
+    }
+    if (acc_go_cmd) {
+      if (brake_request || engine_request_cmd) {
+        return false;
+      }
+      state = CHRYSLER_LONG_LOW_GO;
+      go_cycles = 1U;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_GO) {
+    if (acc_go_cmd) {
+      if (brake_request || engine_request_cmd ||
+          (current_go_cycles >= CHRYSLER_LONG_LOW_GO_MAX_CYCLES)) {
+        return false;
+      }
+      go_cycles = current_go_cycles + 1U;
+    } else {
+      state = CHRYSLER_LONG_LOW_CREEP;
+      go_cycles = 0U;
+    }
+  } else if (current_state == CHRYSLER_LONG_LOW_CREEP) {
+    if (acc_go_cmd) {
+      return false;
+    }
+  } else {
+    return false;
+  }
+
+  *next_state = state;
+  *next_go_cycles = go_cycles;
+  return true;
 }
 
 static inline uint16_t chrysler_long_diagnostic_mask(

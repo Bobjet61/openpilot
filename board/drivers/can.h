@@ -505,6 +505,10 @@ void can_rx(uint8_t can_number) {
           CAN_FIFOMailBox_TypeDef command_diagnostic;
           create_chrysler_wp_command_diagnostic(&command_diagnostic);
           can_send(&command_diagnostic, 0, true);
+
+          CAN_FIFOMailBox_TypeDef owner_diagnostic;
+          create_chrysler_wp_owner_diagnostic(&owner_diagnostic);
+          can_send(&owner_diagnostic, 0, true);
          }
         if (addr == 501) { //0x1f5
           send_acc_dash_msg(&to_send_mod);
