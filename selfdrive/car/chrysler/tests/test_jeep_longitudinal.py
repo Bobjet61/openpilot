@@ -36,6 +36,7 @@ TRANSPORT_MIN_SEND_INTERVAL_NS = LONG.TRANSPORT_MIN_SEND_INTERVAL_NS
 decode_wp_long_diagnostic = LONG.decode_wp_long_diagnostic
 decode_wp_long_command_diagnostic = LONG.decode_wp_long_command_diagnostic
 decode_wp_long_owner_diagnostic = LONG.decode_wp_long_owner_diagnostic
+jeep_acc_faulted = LONG.jeep_acc_faulted
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 
@@ -111,6 +112,12 @@ def load_chryslercan():
 
 
 class TestJeepLongitudinalShadow(unittest.TestCase):
+  def test_b6w_combines_das3_and_dashboard_das4_faults(self):
+    self.assertFalse(jeep_acc_faulted(0, 0))
+    self.assertTrue(jeep_acc_faulted(1, 0))
+    self.assertTrue(jeep_acc_faulted(0, 1))
+    self.assertTrue(jeep_acc_faulted(2, 1))
+
   def test_white_panda_diagnostic_decodes_applied_brake_cycle(self):
     diagnostic = decode_wp_long_diagnostic(0xB7, 0, 0, 0xA4)
     self.assertTrue(diagnostic.valid)
@@ -695,7 +702,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       )
     self.assertEqual(result.limited_accel, ACCEL_MAX)
     self.assertTrue(result.engine_active)
-    self.assertEqual(result.engine_torque_nm, 500.0)
+    self.assertEqual(result.engine_torque_nm, 440.0)
 
   def test_low_speed_torque_is_bounded_after_confirmed_creep(self):
     shadow = JeepLongitudinalShadow()

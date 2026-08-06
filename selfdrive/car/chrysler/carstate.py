@@ -12,6 +12,7 @@ from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   decode_wp_long_command_diagnostic,
   decode_wp_long_diagnostic,
   decode_wp_long_owner_diagnostic,
+  jeep_acc_faulted,
 )
 from openpilot.selfdrive.car.chrysler.values import (
   BUTTON_STATES,
@@ -122,7 +123,14 @@ class CarState(CarStateBase):
     ret.cruiseState.speed = cp_cruise.vl["DAS_4"]["ACC_SET_SPEED_KPH"] * CV.KPH_TO_MS
     ret.cruiseState.nonAdaptive = cp_cruise.vl["DAS_4"]["ACC_STATE"] in (1, 2)  # 1 NormalCCOn and 2 NormalCCSet
     ret.cruiseState.standstill = cp_cruise.vl["DAS_3"]["ACC_STANDSTILL"] == 1
-    ret.accFaulted = cp_cruise.vl["DAS_3"]["ACC_FAULTED"] != 0
+    # The EcoDiesel reports the dashboard ACC/FCW lockout on DAS_4 even when
+    # DAS_3's two-bit fault field remains clear. Treat either source as a real
+    # fault so longitudinal output stops with the dashboard warning instead of
+    # continuing to request torque or braking behind a faulted ACC state.
+    ret.accFaulted = jeep_acc_faulted(
+      cp_cruise.vl["DAS_3"]["ACC_FAULTED"],
+      cp_cruise.vl["DAS_4"]["ACC_FAULTED"],
+    )
     self.forward_gear = ret.gearShifter == car.CarState.GearShifter.drive
     self.cruise_active_actual = ret.cruiseState.enabled
     self.acc_decelerating = (

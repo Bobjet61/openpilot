@@ -32,6 +32,11 @@ WP_LONG_OWNER_STATES = {
 }
 
 
+def jeep_acc_faulted(das_3_fault, das_4_fault):
+  """Combine both FCA ACC fault sources used by the EcoDiesel."""
+  return das_3_fault != 0 or das_4_fault != 0
+
+
 # b6u single-owner stop/go actuation build. Runtime output still requires the host,
 # embedded Panda, and external White Panda to independently accept the same
 # fresh, counter-matched, pedal-free, collision-free command cycle.
@@ -59,9 +64,10 @@ if (
 ACCEL_MIN = -3.0
 # b6r's 5.38% uphill interval stayed at the old 1.25 m/s^2 mapper ceiling
 # while losing 8.24 km/h. A separate stock-ACC uphill capture reached
-# 503.25 Nm median and 535.5 Nm maximum; 1.5 m/s^2 maps that demand into the
-# independently guarded 500 Nm b6s envelope without accepting the planner's
-# full 2.0 m/s^2 request.
+# 503.25 Nm median and 535.5 Nm maximum. b6v's dashboard ACC fault asserted
+# while 500 Nm was saturated, whereas an earlier 439.25 Nm peak remained
+# fault-free. Retain the planner envelope while independently capping the
+# request below the observed fault boundary in the host and both Pandas.
 ACCEL_MAX = 1.5
 # Telemetry-only planner classification threshold. b6o actuator mode selection
 # uses the blended hysteresis thresholds below, not this legacy deadband.
@@ -128,7 +134,7 @@ ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD = math.radians(4.0)
 ENGINE_TORQUE_GRADE_FILTER_TAU_S = 0.75
 ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM = 250.0
 ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS = 20.0
-ENGINE_TORQUE_MAX_NM = 500.0
+ENGINE_TORQUE_MAX_NM = 440.0
 
 # b6r cut normalized switching 48.8%, but its route still cycled at planner
 # requests near -0.14 to -0.19 m/s^2. Offline same-input screening showed that
@@ -146,7 +152,7 @@ BRAKE_EXIT_ACCEL = -0.08
 BRAKE_BLEND_FULL_ACCEL = -0.80
 ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
-# A confirmed brake request must retire even the 500 Nm ceiling before the
+# A confirmed brake request must retire even the 440 Nm ceiling before the
 # coast interlock can admit braking. The faster brake-transition release is
 # only a withdrawal of requested engine torque; propulsion increases retain
 # the ordinary 300 Nm/s limit and normal coasting retains 600 Nm/s.
