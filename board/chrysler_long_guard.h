@@ -83,6 +83,11 @@
 #define CHRYSLER_LONG_OWNER_DIAG_CANCEL_INJECTED (1U << 3)
 #define CHRYSLER_LONG_OWNER_DIAG_STOCK_VALID (1U << 4)
 
+// If factory ACC is already inactive when the host requests ownership, there
+// is no active controller to Cancel. Require five consecutive integrity-
+// checked 50 Hz inactive frames before taking ownership directly.
+#define CHRYSLER_LONG_INACTIVE_CONFIRM_FRAMES 5U
+
 #define CHRYSLER_LONG_LOW_DRIVE 0U
 #define CHRYSLER_LONG_LOW_HOLD 1U
 #define CHRYSLER_LONG_LOW_RELEASE 2U
@@ -193,6 +198,21 @@ static inline bool chrysler_steer_stock_das3_integrity_valid(
          (length == 8) && checksum_valid && counter_valid;
 }
 
+static inline uint8_t chrysler_long_update_inactive_confirmation(
+    const uint8_t current_count,
+    const bool valid_inactive_candidate) {
+  if (!valid_inactive_candidate) {
+    return 0U;
+  }
+  return (current_count < CHRYSLER_LONG_INACTIVE_CONFIRM_FRAMES) ?
+    (uint8_t)(current_count + 1U) : current_count;
+}
+
+static inline bool chrysler_long_inactive_confirmation_complete(
+    const uint8_t count) {
+  return count >= CHRYSLER_LONG_INACTIVE_CONFIRM_FRAMES;
+}
+
 // Factory ACC must not remain an active second longitudinal controller. Start
 // by requesting a normal Cancel while factory ACC retains main availability.
 // Full substitution is permitted only after a subsequent stock DAS_3 confirms
@@ -204,6 +224,7 @@ static inline uint8_t chrysler_long_next_owner_state(
     const bool stock_frame_valid,
     const bool stock_available,
     const bool stock_active,
+    const bool stock_inactive_confirmed,
     const int stock_fault,
     const bool stock_collision) {
   if (!guard_enabled) {
@@ -221,8 +242,9 @@ static inline uint8_t chrysler_long_next_owner_state(
   }
 
   if (owner_state == CHRYSLER_LONG_OWNER_OFF) {
-    return stock_active ?
-      CHRYSLER_LONG_OWNER_CANCELING : CHRYSLER_LONG_OWNER_OFF;
+    return stock_active ? CHRYSLER_LONG_OWNER_CANCELING :
+      (stock_inactive_confirmed ? CHRYSLER_LONG_OWNER_OPENPILOT :
+       CHRYSLER_LONG_OWNER_OFF);
   }
   if (owner_state == CHRYSLER_LONG_OWNER_CANCELING) {
     return stock_active ?

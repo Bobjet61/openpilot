@@ -36,41 +36,41 @@ int main(void) {
   // The first valid host request starts a Cancel handshake but does not yet
   // substitute a factory command.
   uint8_t owner = chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_OFF, true, true, true, true, 0, false);
+    CHRYSLER_LONG_OWNER_OFF, true, true, true, true, false, 0, false);
   assert(owner == CHRYSLER_LONG_OWNER_CANCELING);
   assert(!chrysler_long_should_substitute_das3(
     owner, true, true, 0, false, true, true));
   // Full ownership begins only after a later factory frame confirms inactive
   // ACC while main availability remains set.
   owner = chrysler_long_next_owner_state(
-    owner, true, true, true, false, 0, false);
+    owner, true, true, true, false, false, 0, false);
   assert(owner == CHRYSLER_LONG_OWNER_OPENPILOT);
   assert(chrysler_long_should_substitute_das3(
     owner, true, true, 0, false, true, false));
   // A factory re-engagement suspends substitution and restarts cancellation.
   owner = chrysler_long_next_owner_state(
-    owner, true, true, true, true, 0, false);
+    owner, true, true, true, true, false, 0, false);
   assert(owner == CHRYSLER_LONG_OWNER_CANCELING);
   assert(!chrysler_long_should_substitute_das3(
     owner, true, true, 0, false, true, true));
   // Every authority or stock-safety loss drops ownership immediately.
   assert(chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_OPENPILOT, false, true, true, false, 0, false) ==
+    CHRYSLER_LONG_OWNER_OPENPILOT, false, true, true, false, false, 0, false) ==
     CHRYSLER_LONG_OWNER_OFF);
   assert(chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_OPENPILOT, true, true, false, false, 0, false) ==
+    CHRYSLER_LONG_OWNER_OPENPILOT, true, true, false, false, false, 0, false) ==
     CHRYSLER_LONG_OWNER_OFF);
   assert(chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_OPENPILOT, true, true, true, false, 2, false) ==
+    CHRYSLER_LONG_OWNER_OPENPILOT, true, true, true, false, false, 2, false) ==
     CHRYSLER_LONG_OWNER_OFF);
   assert(chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_OPENPILOT, true, true, true, false, 0, true) ==
+    CHRYSLER_LONG_OWNER_OPENPILOT, true, true, true, false, false, 0, true) ==
     CHRYSLER_LONG_OWNER_OFF);
   assert(chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_FAILED, true, true, true, true, 0, false) ==
+    CHRYSLER_LONG_OWNER_FAILED, true, true, true, true, false, 0, false) ==
     CHRYSLER_LONG_OWNER_FAILED);
   assert(chrysler_long_next_owner_state(
-    CHRYSLER_LONG_OWNER_FAILED, false, true, true, true, 0, false) ==
+    CHRYSLER_LONG_OWNER_FAILED, false, true, true, true, false, 0, false) ==
     CHRYSLER_LONG_OWNER_OFF);
   assert(!chrysler_long_should_substitute_das3(
     CHRYSLER_LONG_OWNER_OPENPILOT, true, true, 2, false, true, false));
@@ -78,6 +78,34 @@ int main(void) {
     CHRYSLER_LONG_OWNER_OPENPILOT, true, true, 0, true, true, false));
   assert(!chrysler_long_should_substitute_das3(
     CHRYSLER_LONG_OWNER_OPENPILOT, true, false, 0, false, true, false));
+
+  // Route 45 reached this state after the second gas override: the host had
+  // fresh authority but factory ACC was already inactive. Ownership must stay
+  // OFF until five consecutive valid inactive frames have been observed.
+  uint8_t inactive_count = 0U;
+  for (uint8_t frame = 1U;
+       frame < CHRYSLER_LONG_INACTIVE_CONFIRM_FRAMES; frame++) {
+    inactive_count = chrysler_long_update_inactive_confirmation(
+      inactive_count, true);
+    assert(!chrysler_long_inactive_confirmation_complete(inactive_count));
+    assert(chrysler_long_next_owner_state(
+      CHRYSLER_LONG_OWNER_OFF, true, true, true, false, false, 0, false) ==
+      CHRYSLER_LONG_OWNER_OFF);
+  }
+  inactive_count = chrysler_long_update_inactive_confirmation(
+    inactive_count, true);
+  assert(chrysler_long_inactive_confirmation_complete(inactive_count));
+  assert(chrysler_long_next_owner_state(
+    CHRYSLER_LONG_OWNER_OFF, true, true, true, false, true, 0, false) ==
+    CHRYSLER_LONG_OWNER_OPENPILOT);
+
+  // Any discontinuity resets the confirmation rather than accumulating
+  // evidence across invalid, unavailable, faulted, or active-stock frames.
+  inactive_count = 3U;
+  inactive_count = chrysler_long_update_inactive_confirmation(
+    inactive_count, false);
+  assert(inactive_count == 0U);
+  assert(!chrysler_long_inactive_confirmation_complete(inactive_count));
 
   assert(chrysler_long_current_stock_frame_valid(
     true, 14, 15, 8, true));

@@ -55,6 +55,7 @@ static int chrysler_steering_stock_source_bus = -1;
 static int chrysler_long_stock_acc_fault = 0;
 static int chrysler_long_owner_diag_stock_fault = 0;
 static uint8_t chrysler_long_owner_state = CHRYSLER_LONG_OWNER_OFF;
+static uint8_t chrysler_long_inactive_confirm_frames = 0U;
 static uint8_t chrysler_long_low_speed_state = CHRYSLER_LONG_LOW_DRIVE;
 static uint8_t chrysler_long_low_speed_go_cycles = 0U;
 static uint16_t chrysler_long_guard_failure_mask = 0xFFFFU;
@@ -77,6 +78,7 @@ static void chrysler_steering_update_guard(void) {
 static void chrysler_long_invalidate_committed_cycle(void) {
   chrysler_long_committed_valid = false;
   chrysler_long_owner_state = CHRYSLER_LONG_OWNER_OFF;
+  chrysler_long_inactive_confirm_frames = 0U;
   chrysler_long_cancel_injected = false;
   chrysler_long_cancel_start_ts = 0U;
   chrysler_long_low_speed_state = CHRYSLER_LONG_LOW_DRIVE;
@@ -391,10 +393,23 @@ static void send_acc_decel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   chrysler_long_owner_diag_stock_collision = stock_collision;
 
   const uint8_t previous_owner_state = chrysler_long_owner_state;
+  const bool valid_inactive_candidate =
+    (chrysler_long_owner_state == CHRYSLER_LONG_OWNER_OFF) &&
+    is_oplong_enabled && current_stock_valid && stock_available &&
+    !stock_active && (stock_fault == 0) && !stock_collision;
+  chrysler_long_inactive_confirm_frames =
+    chrysler_long_update_inactive_confirmation(
+      chrysler_long_inactive_confirm_frames, valid_inactive_candidate);
+  const bool stock_inactive_confirmed =
+    chrysler_long_inactive_confirmation_complete(
+      chrysler_long_inactive_confirm_frames);
   chrysler_long_owner_state = chrysler_long_next_owner_state(
     chrysler_long_owner_state, is_oplong_enabled, current_stock_valid,
     stock_available,
-    stock_active, stock_fault, stock_collision);
+    stock_active, stock_inactive_confirmed, stock_fault, stock_collision);
+  if (chrysler_long_owner_state != CHRYSLER_LONG_OWNER_OFF) {
+    chrysler_long_inactive_confirm_frames = 0U;
+  }
   if ((chrysler_long_owner_state == CHRYSLER_LONG_OWNER_CANCELING) &&
       (previous_owner_state != CHRYSLER_LONG_OWNER_CANCELING)) {
     chrysler_long_cancel_start_ts = TIM2->CNT;
