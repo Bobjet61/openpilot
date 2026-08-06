@@ -665,13 +665,13 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(result.engine_active)
     self.assertAlmostEqual(result.brake_accel_mps2, -1.0188, places=4)
 
-  def test_b6u_flat_road_propulsion_fit_is_applied(self):
+  def test_b6x_flat_road_propulsion_response_is_applied(self):
     shadow = JeepLongitudinalShadow()
     for _ in range(60):
       result = shadow.update(0.5, eligible=True, speed_mps=15.0)
     self.assertEqual(result.limited_accel, 0.5)
     self.assertTrue(result.engine_active)
-    self.assertAlmostEqual(result.engine_torque_nm, 157.50, places=2)
+    self.assertAlmostEqual(result.engine_torque_nm, 169.25, places=2)
     self.assertEqual(result.grade_torque_nm, 0.0)
 
   def test_grade_feed_forward_is_filtered_and_bounded(self):

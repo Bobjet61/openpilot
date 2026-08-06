@@ -9,6 +9,7 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
+from openpilot.selfdrive.car.chrysler.jeep_radar_assist import JeepRadarLongitudinalAssist
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   JEEP_LONG_ACTUATION_COMPILED,
@@ -65,6 +66,11 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_selection = None
     self.jeep_radar_shadow_vision = None
     self.jeep_radar_shadow_reason_counts = Counter()
+    self.jeep_radar_assist = (
+      JeepRadarLongitudinalAssist()
+      if CP.carFingerprint in JEEP_LONG_CARS else None
+    )
+    self.jeep_radar_assist_result = None
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -166,13 +172,28 @@ class CarController(CarControllerBase):
       jeep_long_vehicle_reason,
     )
     if self.frame % 2 == 0:
-      requested_accel = (
+      planner_requested_accel = (
         CC.actuators.accel
         if JEEP_LONG_ACTUATION_COMPILED else (
           self.jeep_long_plan_result.controller_accel_mps2
           if self.jeep_long_plan_result is not None else 0.0
         )
       )
+      if self.jeep_radar_assist is not None:
+        self.jeep_radar_assist_result = self.jeep_radar_assist.update(
+          planner_accel_mps2=planner_requested_accel,
+          speed_mps=CS.out.vEgo,
+          eligible=jeep_long_vehicle_eligible,
+          selection=self.jeep_radar_shadow_selection,
+          vision=self.jeep_radar_shadow_vision,
+          radar_cycle=CS.jeep_radar_shadow.cycle_count,
+          now_nanos=now_nanos,
+        )
+        requested_accel = (
+          self.jeep_radar_assist_result.requested_accel_mps2
+        )
+      else:
+        requested_accel = planner_requested_accel
       # CC.actuators.accel is already the output of openpilot's production
       # longitudinal controller. The separate plan subscriber remains useful
       # for telemetry, but its transient service-valid flag must not reset the
@@ -228,6 +249,7 @@ class CarController(CarControllerBase):
       self.log_wp_long_diagnostic(CS)
       self.log_jeep_long_plan_shadow(CS)
       self.log_jeep_radar_shadow(CS)
+      self.log_jeep_radar_assist()
       self.log_jeep_steering_shadow()
       self.log_jeep_steering_rate5_shadow()
 
@@ -635,6 +657,21 @@ class CarController(CarControllerBase):
       f"window={reason_counts},last={last_result}"
     )
     self.jeep_radar_shadow_reason_counts.clear()
+
+  def log_jeep_radar_assist(self):
+    result = self.jeep_radar_assist_result
+    if result is None:
+      return
+    cloudlog.info(
+      f"Jeep radar assist: active={result.active},"
+      f"mode={result.mode},"
+      f"confirmed={result.match_confirmed},"
+      f"planner_a={result.planner_accel_mps2:.3f},"
+      f"target_a={result.target_accel_mps2:.3f},"
+      f"requested_a={result.requested_accel_mps2:.3f},"
+      f"radar_d={result.radar_d_rel:.2f},"
+      f"radar_v={result.radar_v_rel:.2f}"
+    )
 
   def log_jeep_steering_shadow(self):
     if self.jeep_steering_shadow is None:

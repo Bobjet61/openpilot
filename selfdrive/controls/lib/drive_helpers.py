@@ -199,15 +199,22 @@ class VCruiseHelper:
 
     resume_buttons = (ButtonType.accelCruise, ButtonType.resumeCruise)
 
-    if not self.CP.pcmCruiseSpeed:
+    if self.CP.carName == "chrysler" and self.CP.openpilotLongitudinalControl and self.CP.pcmCruiseSpeed:
+      # Chrysler keeps the PCM-reported speed field for the cluster even when
+      # openpilot owns longitudinal control. A first SET therefore needs the
+      # FCA minimum/current-speed initialization instead of the generic
+      # experimental-mode 105 kph default. Only physical RES may reuse the
+      # previous set speed.
+      initial = FCA_V_CRUISE_MIN[is_metric]
+      resume_buttons = (ButtonType.resumeCruise,)
+    elif not self.CP.pcmCruiseSpeed:
       if self.CP.carName == "honda":
         initial = HONDA_V_CRUISE_MIN[is_metric]
       elif self.CP.carName == "hyundai":
         initial = HYUNDAI_V_CRUISE_MIN[is_metric]
       elif self.CP.carName == "chrysler":
         initial = FCA_V_CRUISE_MIN[is_metric]
-        if not self.CP.pcmCruiseSpeed:
-          resume_buttons = (ButtonType.resumeCruise,)
+        resume_buttons = (ButtonType.resumeCruise,)
       elif self.CP.carName == "mazda":
         initial = MAZDA_V_CRUISE_MIN[is_metric]
       elif self.CP.carName == "volkswagen":

@@ -75,6 +75,10 @@ ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
+# This changes only the internal request while the fixed standstill brake hold
+# remains applied. It lets a confirmed launch reach the separate release state
+# without waiting more than two seconds for the ordinary driving jerk ramp.
+LOW_SPEED_HOLD_LAUNCH_JERK_UP = 4.0
 
 # The complete factory two-sided capture established the low-speed sequence:
 # braking continues through zero, the stopped state holds -2.0 m/s^2, brake
@@ -113,10 +117,10 @@ BRAKE_ACCEL_INTERCEPT_MPS2 = -0.2176
 BRAKE_ACCEL_GAIN = 0.8012
 ENGINE_TORQUE_INTERCEPT_NM = 0.0
 ENGINE_TORQUE_ACCEL_GAIN = 163.5
-# b6q's successful route showed weak response during some positive requests.
-# Retain b6r's modest 10% positive-request term while b6s widens only the
-# separately calibrated high-demand envelope below.
-ENGINE_TORQUE_POSITIVE_ACCEL_GAIN = 16.5
+# The two b6w routes showed a large response deficit below the 440 Nm ceiling.
+# Increase only the positive-request feed-forward; the calibrated base term,
+# low-speed limit, launch limit, and hard maximum remain unchanged.
+ENGINE_TORQUE_POSITIVE_ACCEL_GAIN = 40.0
 ENGINE_TORQUE_SPEED_GAIN = 4.5
 # Do not extrapolate the speed term beyond the 25.58 m/s calibration drive.
 ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
@@ -150,12 +154,12 @@ BRAKE_IMMEDIATE_ACCEL = -0.75
 BRAKE_ENTRY_CONFIRM_CYCLES = 10
 BRAKE_EXIT_ACCEL = -0.08
 BRAKE_BLEND_FULL_ACCEL = -0.80
-ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
+ENGINE_TORQUE_RATE_UP_NM_PER_S = 360.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
 # A confirmed brake request must retire even the 440 Nm ceiling before the
 # coast interlock can admit braking. The faster brake-transition release is
 # only a withdrawal of requested engine torque; propulsion increases retain
-# the ordinary 300 Nm/s limit and normal coasting retains 600 Nm/s.
+# the ordinary bounded rate and normal coasting retains 600 Nm/s.
 BRAKE_TRANSITION_TORQUE_RATE_DOWN_NM_PER_S = 1800.0
 BRAKE_APPLY_RATE_MPS3 = 1.5
 BRAKE_RELEASE_RATE_MPS3 = 2.0
@@ -413,7 +417,15 @@ class JeepLongitudinalShadow:
       self.filtered_pitch_rad = 0.0
     else:
       lower = self.accel_last - JERK_DOWN * COMMAND_DT
-      upper = self.accel_last + JERK_UP * COMMAND_DT
+      jerk_up = (
+        LOW_SPEED_HOLD_LAUNCH_JERK_UP
+        if (
+          self.low_speed_state == "hold"
+          and requested_accel >= LOW_SPEED_LAUNCH_REQUEST_ACCEL
+        )
+        else JERK_UP
+      )
+      upper = self.accel_last + jerk_up * COMMAND_DT
       limited_accel = clip(requested_accel, lower, upper)
       bounded_pitch_rad = clip(
         pitch_rad,
