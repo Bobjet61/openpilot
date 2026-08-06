@@ -902,6 +902,33 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertIsNone(scheduler.next_counter(1_110_000_000, False))
     self.assertEqual(scheduler.next_counter(1_200_000_000, True), 1)
 
+  def test_route45_two_pedal_overrides_do_not_latch_host_transport_off(self):
+    """The host must re-offer a valid cycle after each explicit re-enable."""
+    shadow = JeepLongitudinalShadow()
+    scheduler = JeepLongitudinalTransportScheduler()
+    now = 1_000_000_000
+
+    for expected_counter in (0, 1):
+      active = shadow.update(-0.5, eligible=True, speed_mps=15.0)
+      self.assertTrue(active.transport_enabled)
+      self.assertTrue(active.host_enabled)
+      self.assertEqual(
+        scheduler.next_counter(now, active.transport_enabled),
+        expected_counter,
+      )
+
+      # Gas/brake authority loss withdraws every output and does not consume a
+      # counter. This mirrors both driver overrides in route 45.
+      overridden = shadow.update(-0.5, eligible=False, speed_mps=15.0)
+      self.assertFalse(overridden.transport_enabled)
+      self.assertFalse(overridden.host_enabled)
+      self.assertFalse(overridden.brake_active)
+      self.assertFalse(overridden.engine_active)
+      self.assertIsNone(
+        scheduler.next_counter(now + 10_000_000, False),
+      )
+      now += 100_000_000
+
   def test_transport_scheduler_wraps_counter(self):
     scheduler = JeepLongitudinalTransportScheduler()
     start = 1_000_000_000
