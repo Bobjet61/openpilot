@@ -32,7 +32,7 @@ WP_LONG_OWNER_STATES = {
 }
 
 
-# b6q single-owner stop/go actuation build. Runtime output still requires the host,
+# b6u single-owner stop/go actuation build. Runtime output still requires the host,
 # embedded Panda, and external White Panda to independently accept the same
 # fresh, counter-matched, pedal-free, collision-free command cycle.
 JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True
@@ -57,7 +57,12 @@ if (
 # Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
 ACCEL_MIN = -3.0
-ACCEL_MAX = 1.25
+# b6r's 5.38% uphill interval stayed at the old 1.25 m/s^2 mapper ceiling
+# while losing 8.24 km/h. A separate stock-ACC uphill capture reached
+# 503.25 Nm median and 535.5 Nm maximum; 1.5 m/s^2 maps that demand into the
+# independently guarded 500 Nm b6s envelope without accepting the planner's
+# full 2.0 m/s^2 request.
+ACCEL_MAX = 1.5
 # Telemetry-only planner classification threshold. b6o actuator mode selection
 # uses the blended hysteresis thresholds below, not this legacy deadband.
 ACCEL_DEADBAND = 0.05
@@ -65,11 +70,11 @@ COMMAND_DT = 0.02
 JERK_UP = 1.0
 JERK_DOWN = 2.0
 
-# The factory two-sided capture established the low-speed sequence used here:
+# The complete factory two-sided capture established the low-speed sequence:
 # braking continues through zero, the stopped state holds -2.0 m/s^2, brake
-# release completes before a short GO pulse, and engine torque does not begin
-# until the Jeep is already rolling. A failed launch attempt re-applies hold
-# and will not retry until the controller first withdraws the launch request.
+# release completes before a short GO pulse, and a bounded engine request can
+# begin immediately after GO. A failed launch attempt re-applies hold and will
+# not retry until the controller first withdraws the launch request.
 LOW_SPEED_HOLD_ENTRY_MPS = 0.15
 LOW_SPEED_ENGINE_MIN_MPS = 0.78
 LOW_SPEED_HOLD_ACCEL_MPS2 = -2.0
@@ -77,7 +82,13 @@ LOW_SPEED_LAUNCH_REQUEST_ACCEL = 0.10
 LOW_SPEED_LAUNCH_RESET_ACCEL = 0.02
 LOW_SPEED_LAUNCH_CONFIRM_CYCLES = 10  # 200 ms at the 50 Hz envelope update
 LOW_SPEED_GO_PULSE_CYCLES = 5         # 100 ms, matching the OEM capture
-LOW_SPEED_CREEP_TIMEOUT_CYCLES = 50   # 1.0 s; never add torque from standstill
+# The complete August 5 capture showed that factory engine torque normally
+# begins immediately after GO, before the Jeep reaches 0.78 m/s. Permit only a
+# separately capped, rate-limited launch request after HOLD -> RELEASE -> GO.
+LOW_SPEED_LAUNCH_TORQUE_MAX_NM = 200.0
+LOW_SPEED_LAUNCH_GRADE_MIN_NM = -25.0
+LOW_SPEED_LAUNCH_GRADE_MAX_NM = 50.0
+LOW_SPEED_CREEP_TIMEOUT_CYCLES = 75   # 1.5 s before fail-closed re-hold
 
 # The embedded Panda rejects private cycles closer than 15 ms. Even a 20 ms
 # sender interval occasionally arrived below that threshold after USB/CAN
@@ -94,28 +105,38 @@ TRANSPORT_MIN_SEND_INTERVAL_NS = 25_000_000
 # samples; remaining error is handled by openpilot's normal feedback loop.
 BRAKE_ACCEL_INTERCEPT_MPS2 = -0.2176
 BRAKE_ACCEL_GAIN = 0.8012
-ENGINE_TORQUE_INTERCEPT_NM = -44.2
+ENGINE_TORQUE_INTERCEPT_NM = 0.0
 ENGINE_TORQUE_ACCEL_GAIN = 163.5
-# b6q's successful route showed weak response during some positive requests,
-# while reaching the guarded 425 Nm ceiling in only 4.2% of relevant engine
-# samples. Add a modest 10% positive-request term below that unchanged ceiling
-# without altering zero/negative-acceleration calibration.
+# b6q's successful route showed weak response during some positive requests.
+# Retain b6r's modest 10% positive-request term while b6s widens only the
+# separately calibrated high-demand envelope below.
 ENGINE_TORQUE_POSITIVE_ACCEL_GAIN = 16.5
-ENGINE_TORQUE_SPEED_GAIN = 11.5
+ENGINE_TORQUE_SPEED_GAIN = 4.5
 # Do not extrapolate the speed term beyond the 25.58 m/s calibration drive.
 ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
-# Matched planner/factory samples reached 422.25 Nm. Keep the host and both
-# Panda guards at 425 Nm, below the unrelated 547 Nm factory outlier.
-ENGINE_TORQUE_MAX_NM = 425.0
+# The long LAX factory-ACC capture separated the old speed coefficient from
+# road grade: planner acceleration plus speed explained almost none of the
+# factory torque variance. The complete August 5 capture measured about
+# 3,327 Nm/rad after speed and acceleration, so b6u uses a slightly reduced,
+# filtered coefficient and a bounded contribution. Low-speed launch torque is
+# separately capped by the host and both Pandas.
+ENGINE_TORQUE_GRADE_GAIN_NM_PER_RAD = 3200.0
+ENGINE_TORQUE_GRADE_MIN_NM = -50.0
+ENGINE_TORQUE_GRADE_MAX_NM = 150.0
+ENGINE_TORQUE_GRADE_MIN_SPEED_MPS = 5.0
+ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD = math.radians(4.0)
+ENGINE_TORQUE_GRADE_FILTER_TAU_S = 0.75
+ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM = 250.0
+ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS = 20.0
+ENGINE_TORQUE_MAX_NM = 500.0
 
-# b6q's route recorded 47 engine -> coast and 40 coast -> engine changes,
-# concentrated where the planner moved around its -0.05 m/s^2 propulsion
-# boundary. b6r uses separate entry and exit thresholds: once active, torque
-# tapers smoothly to zero through mild negative corrections, but it cannot
-# restart until the planner has made a positive request. The wide coast region
-# before BRAKE_ENTER_ACCEL and the engine/brake interlock remain unchanged.
+# b6r cut normalized switching 48.8%, but its route still cycled at planner
+# requests near -0.14 to -0.19 m/s^2. Offline same-input screening showed that
+# extending the taper to -0.32 m/s^2 reduces modeled transitions from 67 to 32
+# while preserving all brake entries and the zero-overlap interlock. The
+# remaining -0.32 to -0.40 coast band still separates propulsion from braking.
 PROPULSION_ENTER_ACCEL = 0.02
-PROPULSION_EXIT_ACCEL = -0.15
+PROPULSION_EXIT_ACCEL = -0.32
 TORQUE_BLEND_ZERO_ACCEL = PROPULSION_EXIT_ACCEL
 TORQUE_BLEND_FULL_ACCEL = 0.0
 BRAKE_ENTER_ACCEL = -0.40
@@ -125,7 +146,7 @@ BRAKE_EXIT_ACCEL = -0.08
 BRAKE_BLEND_FULL_ACCEL = -0.80
 ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
-# A confirmed brake request must retire even the 425 Nm ceiling before the
+# A confirmed brake request must retire even the 500 Nm ceiling before the
 # coast interlock can admit braking. The faster brake-transition release is
 # only a withdrawal of requested engine torque; propulsion increases retain
 # the ordinary 300 Nm/s limit and normal coasting retains 600 Nm/s.
@@ -170,6 +191,8 @@ class JeepLongitudinalEnvelope:
   brake_active: bool
   engine_active: bool
   engine_torque_nm: float
+  filtered_pitch_rad: float
+  grade_torque_nm: float
   command_mode: str
   brake_latched: bool
   stop_request: bool
@@ -349,17 +372,21 @@ class JeepLongitudinalShadow:
     self.release_transport_confirmed = False
     self.go_pulse_remaining = 0
     self.creep_wait_remaining = 0
+    self.filtered_pitch_rad = 0.0
 
   def update(
       self,
       requested_accel: float,
       eligible: bool,
       speed_mps: float = 0.0,
+      pitch_rad: float = 0.0,
   ) -> JeepLongitudinalEnvelope:
     if not math.isfinite(requested_accel) or not math.isfinite(speed_mps):
       requested_accel = 0.0
       speed_mps = 0.0
       eligible = False
+    if not math.isfinite(pitch_rad):
+      pitch_rad = 0.0
     requested_accel = clip(requested_accel, ACCEL_MIN, ACCEL_MAX)
 
     if not eligible:
@@ -377,10 +404,22 @@ class JeepLongitudinalShadow:
       self.release_transport_confirmed = False
       self.go_pulse_remaining = 0
       self.creep_wait_remaining = 0
+      self.filtered_pitch_rad = 0.0
     else:
       lower = self.accel_last - JERK_DOWN * COMMAND_DT
       upper = self.accel_last + JERK_UP * COMMAND_DT
       limited_accel = clip(requested_accel, lower, upper)
+      bounded_pitch_rad = clip(
+        pitch_rad,
+        -ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD,
+        ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD,
+      )
+      pitch_alpha = COMMAND_DT / (
+        ENGINE_TORQUE_GRADE_FILTER_TAU_S + COMMAND_DT
+      )
+      self.filtered_pitch_rad += pitch_alpha * (
+        bounded_pitch_rad - self.filtered_pitch_rad
+      )
 
     self.accel_last = limited_accel
     if eligible:
@@ -454,14 +493,32 @@ class JeepLongitudinalShadow:
       speed_mps, 0.0, ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS,
     )
     desired_engine_torque_nm = 0.0
+    grade_torque_nm = 0.0
     if eligible and not self.brake_latched and self.propulsion_latched:
+      if speed_mps >= ENGINE_TORQUE_GRADE_MIN_SPEED_MPS:
+        grade_torque_nm = clip(
+          ENGINE_TORQUE_GRADE_GAIN_NM_PER_RAD * self.filtered_pitch_rad,
+          ENGINE_TORQUE_GRADE_MIN_NM,
+          ENGINE_TORQUE_GRADE_MAX_NM,
+        )
+      speed_limited_torque_max_nm = clip(
+        ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM
+        + ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS * calibration_speed_mps,
+        ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM,
+        ENGINE_TORQUE_MAX_NM,
+      )
       base_engine_torque_nm = clip(
         ENGINE_TORQUE_INTERCEPT_NM
         + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
         + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * max(limited_accel, 0.0)
         + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps,
         0.0,
-        ENGINE_TORQUE_MAX_NM,
+        speed_limited_torque_max_nm,
+      )
+      base_engine_torque_nm = clip(
+        base_engine_torque_nm + grade_torque_nm,
+        0.0,
+        speed_limited_torque_max_nm,
       )
       # The input slew limiter must never create or sustain propulsion after
       # the production controller has already requested deceleration. Use the
@@ -499,19 +556,38 @@ class JeepLongitudinalShadow:
         calibrated_brake_accel_mps2 * brake_blend
       )
 
-    # Low-speed overrides are deliberately asymmetric: braking is allowed all
-    # the way to zero, while propulsion remains impossible until wheel speed
-    # independently proves that the Jeep is already rolling.
+    # Low-speed overrides require the complete stopped sequence. RELEASE and
+    # GO remain neutral. Only the subsequent CREEP state can apply the small
+    # launch envelope observed in the full factory capture; ordinary low-speed
+    # DRIVE still requires independently measured rolling speed.
     if eligible and self.low_speed_state in ("hold", "blocked"):
       desired_engine_torque_nm = 0.0
       desired_brake_accel_mps2 = LOW_SPEED_HOLD_ACCEL_MPS2
       self.brake_latched = True
       self.brake_immediate = False
-    elif eligible and self.low_speed_state in ("release", "go", "creep"):
+    elif eligible and self.low_speed_state in ("release", "go"):
       desired_engine_torque_nm = 0.0
       desired_brake_accel_mps2 = 0.0
       self.brake_latched = False
       self.brake_immediate = False
+    elif eligible and self.low_speed_state == "creep":
+      desired_brake_accel_mps2 = 0.0
+      self.brake_latched = False
+      self.brake_immediate = False
+      if self.propulsion_latched and limited_accel >= LOW_SPEED_LAUNCH_REQUEST_ACCEL:
+        launch_grade_torque_nm = clip(
+          ENGINE_TORQUE_GRADE_GAIN_NM_PER_RAD * self.filtered_pitch_rad,
+          LOW_SPEED_LAUNCH_GRADE_MIN_NM,
+          LOW_SPEED_LAUNCH_GRADE_MAX_NM,
+        )
+        grade_torque_nm = launch_grade_torque_nm
+        desired_engine_torque_nm = clip(
+          desired_engine_torque_nm + launch_grade_torque_nm,
+          0.0,
+          LOW_SPEED_LAUNCH_TORQUE_MAX_NM,
+        )
+      else:
+        desired_engine_torque_nm = 0.0
     elif eligible and speed_mps < LOW_SPEED_ENGINE_MIN_MPS:
       desired_engine_torque_nm = 0.0
 
@@ -584,9 +660,10 @@ class JeepLongitudinalShadow:
     brake_active = brake_accel_mps2 < 0.0
     engine_active = engine_torque_nm > 0.0
 
-    # A GO pulse cannot overlap any residual brake request. After the captured
-    # 100 ms pulse, wait for vehicle creep. If rolling speed is not established
-    # within one second, reapply hold and latch the attempt blocked.
+    # A GO pulse cannot overlap any residual brake or engine request. After the
+    # captured 100 ms pulse, permit the separately bounded launch envelope. If
+    # rolling speed is not established within 1.5 seconds, reapply hold and
+    # latch the attempt blocked.
     go_request = False
     if eligible and self.low_speed_state == "release":
       if brake_active:
@@ -654,6 +731,8 @@ class JeepLongitudinalShadow:
       brake_active=brake_active,
       engine_active=engine_active,
       engine_torque_nm=engine_torque_nm,
+      filtered_pitch_rad=self.filtered_pitch_rad,
+      grade_torque_nm=grade_torque_nm,
       command_mode=command_mode,
       brake_latched=self.brake_latched,
       stop_request=(

@@ -181,6 +181,7 @@ class CarController(CarControllerBase):
         requested_accel,
         jeep_long_vehicle_eligible,
         CS.out.vEgo,
+        CC.orientationNED[1] if len(CC.orientationNED) > 1 else float("nan"),
       )
       self.jeep_long_shadow_frames = []
       self.jeep_long_transport_frames = []
@@ -214,6 +215,8 @@ class CarController(CarControllerBase):
         f"brake_cmd={self.jeep_long_envelope.brake_accel_mps2:.3f}, "
         f"engine={self.jeep_long_envelope.engine_active}, "
         f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
+        f"pitch={self.jeep_long_envelope.filtered_pitch_rad:.4f}, "
+        f"grade_torque={self.jeep_long_envelope.grade_torque_nm:.1f}, "
         f"mode={self.jeep_long_envelope.command_mode}, "
         f"brake_latched={self.jeep_long_envelope.brake_latched}, "
         f"stop={self.jeep_long_envelope.stop_request}, "
