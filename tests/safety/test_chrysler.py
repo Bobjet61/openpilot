@@ -359,13 +359,33 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     values = {"SPEED_LEFT": speed, "SPEED_RIGHT": speed}
     return self.packer.make_can_msg_panda("SPEED_1", 0, values)
 
-  def _user_gas_msg(self, gas):
-    values = {"Accelerator_Position": gas}
+  def _user_gas_msg(self, gas, counter=0):
+    values = {"Accelerator_Position": gas, "COUNTER": counter}
     return self.packer.make_can_msg_panda("ECM_5", 0, values)
 
-  def _user_brake_msg(self, brake):
-    values = {"Brake_Pedal_State": 1 if brake else 0}
+  def _user_brake_msg(self, brake, counter=0):
+    values = {
+      "Brake_Pedal_State": 1 if brake else 0,
+      "COUNTER": counter,
+    }
     return self.packer.make_can_msg_panda("ESP_1", 0, values)
+
+  def _physical_button_msg(self, counter, accel=False, decel=False,
+                           resume=False, cancel=False,
+                           corrupt_checksum=False, bus=0):
+    values = {
+      "ACC_Accel": accel,
+      "ACC_Decel": decel,
+      "ACC_Resume": resume,
+      "ACC_Cancel": cancel,
+      "COUNTER": counter,
+    }
+    msg = self.packer.make_can_msg_panda("CRUISE_BUTTONS", bus, values)
+    if corrupt_checksum:
+      dat = bytearray(bytes(msg.data)[:3])
+      dat[2] ^= 1
+      return common.make_msg(bus, 0x23B, dat=bytes(dat))
+    return msg
 
   @staticmethod
   def _fca_checksum(dat):
@@ -655,6 +675,155 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._tx(self._private_brake_msg(0)))
     self.assertFalse(self._tx(self._private_dash_msg(0, enable=False)))
     self.assertFalse(self._tx(self._private_torque_msg(0)))
+
+  def test_route45_second_gas_override_rearms_on_fresh_physical_set(self):
+    """Regression for the permanent controls_long rejection in route 45."""
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source(counter=1)
+    self.assertEqual(
+      self._tx_private_cycle(0, 1_000_000, enable=True),
+      (True, True, True),
+    )
+
+    # First pedal override: stock ACC remains inactive after the driver lets
+    # go. A fresh physical SET+ press/release explicitly re-arms permission.
+    self.safety.set_timer(1_010_000)
+    self.assertTrue(self._rx(self._user_gas_msg(1, counter=1)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=2)))
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.assertEqual(
+      self._tx_private_cycle(1, 1_020_000, enable=True),
+      (False, False, False),
+    )
+    self.assertTrue(self._rx(self._physical_button_msg(0, accel=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(1)))
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=3, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertEqual(
+      self._tx_private_cycle(1, 1_040_000, enable=True),
+      (True, True, True),
+    )
+
+    # Reproduce the second override from the route; permission must not remain
+    # deadlocked after another explicit, validated SET action.
+    self.safety.set_timer(1_050_000)
+    self.assertTrue(self._rx(self._user_gas_msg(1, counter=3)))
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=4)))
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=4, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.assertEqual(
+      self._tx_private_cycle(2, 1_060_000, enable=True),
+      (False, False, False),
+    )
+    self.assertTrue(self._rx(self._physical_button_msg(2, decel=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(3)))
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertEqual(
+      self._tx_private_cycle(2, 1_080_000, enable=True),
+      (True, True, True),
+    )
+
+  def test_long_rearm_requires_clean_press_and_release(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_000_000)
+    self._enable_safe_source(counter=1)
+    self.assertTrue(self._rx(self._user_gas_msg(1, counter=1)))
+
+    # A press begun while a pedal is down remains disqualified after release.
+    self.assertTrue(self._rx(self._physical_button_msg(0, resume=True)))
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=2)))
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+    self.assertTrue(self._rx(self._physical_button_msg(1)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+    # A fresh, pedal-free action succeeds, then physical Cancel revokes it.
+    self.assertTrue(self._rx(self._physical_button_msg(2, resume=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(3)))
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._rx(self._physical_button_msg(4, cancel=True)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+  def test_long_rearm_rejects_corrupt_wrong_bus_and_stale_buttons(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(3_000_000)
+    self._enable_safe_source(counter=1)
+    self.assertTrue(self._rx(self._user_gas_msg(1, counter=1)))
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=2)))
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+
+    self.assertFalse(self._rx(self._physical_button_msg(
+      0, accel=True, corrupt_checksum=True,
+    )))
+    self.assertTrue(self._rx(self._physical_button_msg(1)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+    self.assertTrue(self._rx(self._physical_button_msg(
+      2, accel=True, bus=1,
+    )))
+    self.assertTrue(self._rx(self._physical_button_msg(2)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+    self.safety.set_timer(3_000_000 + self.SOURCE_TIMEOUT_US + 1)
+    self.assertTrue(self._rx(self._physical_button_msg(3, accel=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(4)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+  def test_long_rearm_requires_valid_sources_after_corruption(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(4_000_000)
+    self._enable_safe_source(counter=1)
+    self.assertTrue(self._rx(self._user_gas_msg(1, counter=1)))
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=2)))
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+
+    gas = self._user_gas_msg(0, counter=3)
+    dat = bytearray(bytes(gas.data)[:8])
+    dat[7] ^= 1
+    self.assertFalse(self._rx(common.make_msg(
+      0, 0x22F, dat=bytes(dat),
+    )))
+    self.assertTrue(self._rx(self._physical_button_msg(0, resume=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(1)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+    # One subsequent integrity-valid gas frame restores that source; a new
+    # explicit action is still required.
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=4)))
+    self.assertTrue(self._rx(self._physical_button_msg(2, resume=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(3)))
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+
+  def test_long_rearm_ignores_wrong_length_button_frame(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(5_000_000)
+    self._enable_safe_source(counter=1)
+    self.assertTrue(self._rx(self._user_gas_msg(1, counter=1)))
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=2)))
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=0,
+    )))
+
+    wrong_length = bytearray(8)
+    wrong_length[0] = 0x04
+    self.assertTrue(self._rx(common.make_msg(
+      0, 0x23B, dat=bytes(wrong_length),
+    )))
+    self.assertTrue(self._rx(self._physical_button_msg(0)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
 
   def test_private_actuation_flag_without_shadow_cannot_transmit(self):
     self.safety.set_safety_hooks(

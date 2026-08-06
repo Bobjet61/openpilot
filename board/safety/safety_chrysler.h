@@ -166,6 +166,18 @@ RxCheck chrysler_rx_checks[] = {
   {.msg = {{CHRYSLER_ADDRS.DAS_3, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
 };
 
+// Full longitudinal control uses physical SET/RES releases to re-arm after a
+// pedal override. Keep that input behind the same checksum/counter validation
+// as the other safety-critical vehicle sources without changing stock modes.
+RxCheck chrysler_long_rx_checks[] = {
+  {.msg = {{CHRYSLER_ADDRS.EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS.ESP_1, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  {.msg = {{514, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 100U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS.ECM_5, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS.DAS_3, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  {.msg = {{CHRYSLER_ADDRS.CRUISE_BUTTONS, 0, 3, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+};
+
 RxCheck chrysler_ram_dt_rx_checks[] = {
   {.msg = {{CHRYSLER_RAM_DT_ADDRS.EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
   {.msg = {{CHRYSLER_RAM_DT_ADDRS.ESP_1, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
@@ -228,6 +240,8 @@ static uint8_t chrysler_long_low_speed_go_cycles = 0U;
 static uint32_t chrysler_long_last_cycle_ts = 0U;
 static bool chrysler_b6y_hold_active = false;
 static uint32_t chrysler_b6y_hold_last_ts = 0U;
+static uint8_t chrysler_long_enable_button_prev = 0U;
+static bool chrysler_long_enable_press_qualified = false;
 
 typedef enum {
   CHRYSLER_LONG_REJECT_NONE = 0U,
@@ -404,7 +418,9 @@ static uint32_t chrysler_compute_checksum(const CANPacket_t *to_push) {
 }
 
 static uint8_t chrysler_get_counter(const CANPacket_t *to_push) {
-  return (uint8_t)(GET_BYTE(to_push, 6) >> 4);
+  return (GET_ADDR(to_push) == chrysler_addrs->CRUISE_BUTTONS) ?
+    (uint8_t)(GET_BYTE(to_push, 1) >> 4) :
+    (uint8_t)(GET_BYTE(to_push, 6) >> 4);
 }
 
 static bool chrysler_long_fresh(const uint32_t now, const uint32_t last,
@@ -423,6 +439,37 @@ static bool chrysler_b6y_hold_sources_valid(void) {
          (chrysler_platform == CHRYSLER_PACIFICA) &&
          chrysler_das_3_last_valid &&
          acc_main_on && !vehicle_moving &&
+         !gas_pressed && !brake_pressed &&
+         !chrysler_long_stock_collision &&
+         chrysler_long_fresh(now, chrysler_long_speed_ts,
+                             chrysler_long_speed_seen) &&
+         chrysler_long_fresh(now, chrysler_long_gas_ts,
+                             chrysler_long_gas_seen) &&
+         chrysler_long_fresh(now, chrysler_long_brake_ts,
+                             chrysler_long_brake_seen) &&
+         chrysler_long_fresh(now, chrysler_long_stock_ts,
+                             chrysler_long_stock_seen);
+}
+
+static bool chrysler_long_rearm_sources_valid(void) {
+  const uint32_t now = microsecond_timer_get();
+  const int required_rx_checks[] = {1, 2, 3, 4, 5};
+  bool rx_integrity_valid = true;
+  for (uint8_t i = 0U;
+       i < (sizeof(required_rx_checks) / sizeof(required_rx_checks[0]));
+       i++) {
+    const RxStatus status =
+      chrysler_long_rx_checks[required_rx_checks[i]].status;
+    rx_integrity_valid = rx_integrity_valid && status.msg_seen &&
+                         status.valid_checksum &&
+                         status.valid_quality_flag &&
+                         (status.wrong_counters < MAX_WRONG_COUNTERS) &&
+                         !status.lagging;
+  }
+  return chrysler_long_actuation_enabled &&
+         (chrysler_platform == CHRYSLER_PACIFICA) &&
+         rx_integrity_valid &&
+         chrysler_das_3_last_valid && acc_main_on &&
          !gas_pressed && !brake_pressed &&
          !chrysler_long_stock_collision &&
          chrysler_long_fresh(now, chrysler_long_speed_ts,
@@ -790,7 +837,18 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     chrysler_das_3_last_valid = true;
 
     bool cruise_engaged = GET_BIT(to_push, 21U);
-    pcm_cruise_check(cruise_engaged);
+    if (chrysler_long_actuation_enabled) {
+      // Factory ACC is intentionally inactive while the White Panda owns
+      // DAS_3. Preserve the normal rising-edge enable, but do not revoke a
+      // prior physical SET/RES enable merely because stock ACC stays inactive.
+      if (cruise_engaged && !cruise_engaged_prev) {
+        controls_allowed = true;
+        controls_allowed_long = true;
+      }
+      cruise_engaged_prev = cruise_engaged;
+    } else {
+      pcm_cruise_check(cruise_engaged);
+    }
 
     acc_main_on = GET_BIT(to_push, 20U) != 0U;
     mads_acc_main_check(acc_main_on);
@@ -803,6 +861,43 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
         chrysler_long_stock_collision) {
       chrysler_b6y_hold_clear();
     }
+    if (!acc_main_on || chrysler_long_stock_collision) {
+      chrysler_long_enable_press_qualified = false;
+      controls_allowed_long = false;
+    }
+  }
+
+  if ((bus == 0) && (addr == chrysler_addrs->CRUISE_BUTTONS) &&
+      (GET_LEN(to_push) == 3) &&
+      chrysler_long_actuation_enabled) {
+    const uint8_t enable_buttons = GET_BYTE(to_push, 0) & 0x1CU;
+    const bool single_enable_button =
+      (enable_buttons == 0x04U) || (enable_buttons == 0x08U) ||
+      (enable_buttons == 0x10U);
+    const bool cancel_pressed = (GET_BYTE(to_push, 0) & 0x01U) != 0U;
+
+    if (cancel_pressed) {
+      controls_allowed_long = false;
+      chrysler_long_enable_press_qualified = false;
+    } else if ((chrysler_long_enable_button_prev == 0U) &&
+               single_enable_button) {
+      // Qualification occurs on the press, not only on release, so a button
+      // held through a pedal transition cannot silently re-arm actuation.
+      chrysler_long_enable_press_qualified =
+        chrysler_long_rearm_sources_valid();
+    } else if ((chrysler_long_enable_button_prev != 0U) &&
+               (enable_buttons == 0U)) {
+      if (chrysler_long_enable_press_qualified &&
+          chrysler_long_rearm_sources_valid()) {
+        controls_allowed = true;
+        controls_allowed_long = true;
+      }
+      chrysler_long_enable_press_qualified = false;
+    } else if (!single_enable_button && (enable_buttons != 0U)) {
+      chrysler_long_enable_press_qualified = false;
+    } else {
+    }
+    chrysler_long_enable_button_prev = enable_buttons;
   }
 
   // TODO: use the same message for both
@@ -829,6 +924,7 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     chrysler_long_gas_seen = true;
     if (gas_pressed) {
       chrysler_b6y_hold_clear();
+      chrysler_long_enable_press_qualified = false;
     }
   }
 
@@ -839,6 +935,7 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     chrysler_long_brake_seen = true;
     if (brake_pressed) {
       chrysler_b6y_hold_clear();
+      chrysler_long_enable_press_qualified = false;
     }
   }
 
@@ -983,6 +1080,8 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_long_low_speed_state = CHRYSLER_LONG_LOW_DRIVE;
   chrysler_long_low_speed_go_cycles = 0U;
   chrysler_b6y_hold_last_ts = 0U;
+  chrysler_long_enable_button_prev = 0U;
+  chrysler_long_enable_press_qualified = false;
   chrysler_b6y_hold_clear();
   chrysler_long_reset_pending();
 
@@ -1017,7 +1116,7 @@ static safety_config chrysler_init(uint16_t param) {
       chrysler_long_shadow_enabled &&
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_ACTUATION);
     if (chrysler_long_shadow_enabled) {
-      ret = BUILD_SAFETY_CFG(chrysler_rx_checks,
+      ret = BUILD_SAFETY_CFG(chrysler_long_rx_checks,
                              CHRYSLER_LONG_SHADOW_TX_MSGS);
     } else {
       ret = BUILD_SAFETY_CFG(chrysler_rx_checks, CHRYSLER_TX_MSGS);
