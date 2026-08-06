@@ -51,14 +51,16 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_BRAKE_ADDR 0x1F6U
 #define CHRYSLER_LONG_DASH_ADDR 0x1F7U
 #define CHRYSLER_LONG_TORQUE_ADDR 0x272U
+#define CHRYSLER_LONG_DAS_4_ADDR 0x1F5U
 #define CHRYSLER_LONG_DECEL_MIN_RAW 2661
 #define CHRYSLER_LONG_DECEL_MAX_RAW 3275
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-// A stock-ACC uphill capture sustained 503.25 Nm median and reached 535.5 Nm
-// with both pedals released. The private DAS_3 scaling is raw * 0.25 - 500 Nm,
-// so raw 4000 independently enforces the common 500 Nm b6s ceiling.
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
+// b6v asserted the DAS_4 dashboard fault while a 500 Nm request was saturated,
+// while an earlier 439.25 Nm peak remained fault-free. The private DAS_3
+// scaling is raw * 0.25 - 500 Nm, so raw 3760 independently enforces b6w's
+// common 440 Nm ceiling.
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 3760
 #define CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW 11
 #define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2800
 #define CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW 12
@@ -176,6 +178,9 @@ RxCheck chrysler_long_rx_checks[] = {
   {.msg = {{CHRYSLER_ADDRS.ECM_5, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
   {.msg = {{CHRYSLER_ADDRS.DAS_3, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
   {.msg = {{CHRYSLER_ADDRS.CRUISE_BUTTONS, 0, 3, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  // DAS_4 has no checksum or counter in the FCA DBC. Its 50 Hz liveness and
+  // dashboard ACC fault bit are nevertheless independent longitudinal gates.
+  {.msg = {{CHRYSLER_LONG_DAS_4_ADDR, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 50U}, { 0 }, { 0 }}},
 };
 
 RxCheck chrysler_ram_dt_rx_checks[] = {
@@ -219,6 +224,8 @@ static bool chrysler_jeep_rate5_enabled = false;
 static bool chrysler_long_diagnostic_enabled = false;
 static bool chrysler_long_actuation_enabled = false;
 static bool chrysler_long_stock_collision = false;
+static bool chrysler_long_dashboard_fault = false;
+static bool chrysler_long_dashboard_seen = false;
 static bool chrysler_long_speed_seen = false;
 static bool chrysler_long_gas_seen = false;
 static bool chrysler_long_brake_seen = false;
@@ -227,6 +234,7 @@ static uint32_t chrysler_long_speed_ts = 0U;
 static uint32_t chrysler_long_gas_ts = 0U;
 static uint32_t chrysler_long_brake_ts = 0U;
 static uint32_t chrysler_long_stock_ts = 0U;
+static uint32_t chrysler_long_dashboard_ts = 0U;
 static uint8_t chrysler_long_stage = 0U;
 static uint8_t chrysler_long_cycle_counter = 0U;
 static uint8_t chrysler_long_last_counter = 0U;
@@ -278,6 +286,9 @@ typedef enum {
   CHRYSLER_LONG_REJECT_TORQUE_PAYLOAD = 31U,
   CHRYSLER_LONG_REJECT_TORQUE_CONFLICT = 32U,
   CHRYSLER_LONG_REJECT_LOW_SPEED_SEQUENCE = 33U,
+  CHRYSLER_LONG_REJECT_DASHBOARD_FAULT = 34U,
+  CHRYSLER_LONG_REJECT_DASHBOARD_MISSING = 35U,
+  CHRYSLER_LONG_REJECT_DASHBOARD_STALE = 36U,
 } ChryslerLongRejectReason;
 
 typedef enum {
@@ -441,6 +452,7 @@ static bool chrysler_b6y_hold_sources_valid(void) {
          acc_main_on && !vehicle_moving &&
          !gas_pressed && !brake_pressed &&
          !chrysler_long_stock_collision &&
+         !chrysler_long_dashboard_fault &&
          chrysler_long_fresh(now, chrysler_long_speed_ts,
                              chrysler_long_speed_seen) &&
          chrysler_long_fresh(now, chrysler_long_gas_ts,
@@ -448,12 +460,14 @@ static bool chrysler_b6y_hold_sources_valid(void) {
          chrysler_long_fresh(now, chrysler_long_brake_ts,
                              chrysler_long_brake_seen) &&
          chrysler_long_fresh(now, chrysler_long_stock_ts,
-                             chrysler_long_stock_seen);
+                             chrysler_long_stock_seen) &&
+         chrysler_long_fresh(now, chrysler_long_dashboard_ts,
+                             chrysler_long_dashboard_seen);
 }
 
 static bool chrysler_long_rearm_sources_valid(void) {
   const uint32_t now = microsecond_timer_get();
-  const int required_rx_checks[] = {1, 2, 3, 4, 5};
+  const int required_rx_checks[] = {1, 2, 3, 4, 5, 6};
   bool rx_integrity_valid = true;
   for (uint8_t i = 0U;
        i < (sizeof(required_rx_checks) / sizeof(required_rx_checks[0]));
@@ -472,6 +486,7 @@ static bool chrysler_long_rearm_sources_valid(void) {
          chrysler_das_3_last_valid && acc_main_on &&
          !gas_pressed && !brake_pressed &&
          !chrysler_long_stock_collision &&
+         !chrysler_long_dashboard_fault &&
          chrysler_long_fresh(now, chrysler_long_speed_ts,
                              chrysler_long_speed_seen) &&
          chrysler_long_fresh(now, chrysler_long_gas_ts,
@@ -479,7 +494,9 @@ static bool chrysler_long_rearm_sources_valid(void) {
          chrysler_long_fresh(now, chrysler_long_brake_ts,
                              chrysler_long_brake_seen) &&
          chrysler_long_fresh(now, chrysler_long_stock_ts,
-                             chrysler_long_stock_seen);
+                             chrysler_long_stock_seen) &&
+         chrysler_long_fresh(now, chrysler_long_dashboard_ts,
+                             chrysler_long_dashboard_seen);
 }
 
 static bool chrysler_b6y_hold_recent(void) {
@@ -495,7 +512,14 @@ static uint8_t chrysler_long_source_reject_reason(uint32_t *detail) {
   uint8_t reason = CHRYSLER_LONG_REJECT_NONE;
   *detail = 0U;
 
-  if (!controls_allowed) {
+  if (chrysler_long_dashboard_fault) {
+    reason = CHRYSLER_LONG_REJECT_DASHBOARD_FAULT;
+  } else if (!chrysler_long_dashboard_seen) {
+    reason = CHRYSLER_LONG_REJECT_DASHBOARD_MISSING;
+  } else if (!chrysler_long_fresh(now, chrysler_long_dashboard_ts, true)) {
+    reason = CHRYSLER_LONG_REJECT_DASHBOARD_STALE;
+    *detail = get_ts_elapsed(now, chrysler_long_dashboard_ts);
+  } else if (!controls_allowed) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS;
   } else if (!controls_allowed_long) {
     reason = CHRYSLER_LONG_REJECT_CONTROLS_LONG;
@@ -822,6 +846,23 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
   const int bus = GET_BUS(to_push);
   const int addr = GET_ADDR(to_push);
 
+  // DAS_4 carries the dashboard ACC/FCW fault actually asserted by this Jeep.
+  // Revoke only longitudinal permission immediately; a later clear frame does
+  // not re-arm actuation without a new, clean physical SET/RES action.
+  if ((bus == 0) && (addr == CHRYSLER_LONG_DAS_4_ADDR) &&
+      (GET_LEN(to_push) == 8)) {
+    chrysler_long_dashboard_fault = GET_BIT(to_push, 50U) != 0U;
+    chrysler_long_dashboard_seen = true;
+    chrysler_long_dashboard_ts = microsecond_timer_get();
+    if (chrysler_long_dashboard_fault &&
+        chrysler_long_actuation_enabled) {
+      controls_allowed_long = false;
+      chrysler_long_enable_press_qualified = false;
+      chrysler_b6y_hold_clear();
+      chrysler_long_reset_pending();
+    }
+  }
+
   // Measured EPS torque
   if ((bus == 0) && (addr == chrysler_addrs->EPS_2)) {
     int torque_meas_new = ((GET_BYTE(to_push, 4) & 0x7U) << 8) + GET_BYTE(to_push, 5) - 1024U;
@@ -1082,6 +1123,9 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_b6y_hold_last_ts = 0U;
   chrysler_long_enable_button_prev = 0U;
   chrysler_long_enable_press_qualified = false;
+  chrysler_long_dashboard_fault = false;
+  chrysler_long_dashboard_seen = false;
+  chrysler_long_dashboard_ts = 0U;
   chrysler_b6y_hold_clear();
   chrysler_long_reset_pending();
 

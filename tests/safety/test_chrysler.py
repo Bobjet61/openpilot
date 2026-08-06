@@ -138,6 +138,11 @@ class TestChryslerB6yHoldSafety(common.PandaSafetyTestBase):
     values.update(changes)
     return self.packer.make_can_msg_panda("DAS_3", 0, values)
 
+  def _das_4_msg(self, faulted=False):
+    return self.packer.make_can_msg_panda(
+      "DAS_4", 0, {"ACC_FAULTED": int(faulted)},
+    )
+
   def _speed_msg(self, speed):
     values = {"SPEED_LEFT": speed, "SPEED_RIGHT": speed}
     return self.packer.make_can_msg_panda("SPEED_1", 0, values)
@@ -169,6 +174,7 @@ class TestChryslerB6yHoldSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._speed_msg(0)))
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
+    self.assertTrue(self._rx(self._das_4_msg()))
 
   def test_exact_hold_frame_unlocks_only_recent_resume(self):
     self.assertFalse(self._tx(self._button_msg(resume=True)))
@@ -239,6 +245,12 @@ class TestChryslerB6yHoldSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._tx(self._hold_msg()))
     self.assertTrue(self._tx(self._button_msg(cancel=True)))
     self.assertFalse(self._tx(self._button_msg(resume=True)))
+
+  def test_dashboard_fault_clears_hold_authority(self):
+    self._enable_hold_sources()
+    self.assertTrue(self._tx(self._hold_msg()))
+    self.assertTrue(self._rx(self._das_4_msg(faulted=True)))
+    self.assertFalse(self._tx(self._hold_msg(counter=4)))
 
 
 class TestJeepRate4Limits(unittest.TestCase):
@@ -355,6 +367,11 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     values.update(changes)
     return self.packer.make_can_msg_panda("DAS_3", 0, values)
 
+  def _das_4_msg(self, faulted=False):
+    return self.packer.make_can_msg_panda(
+      "DAS_4", 0, {"ACC_FAULTED": int(faulted)},
+    )
+
   def _speed_msg(self, speed):
     values = {"SPEED_LEFT": speed, "SPEED_RIGHT": speed}
     return self.packer.make_can_msg_panda("SPEED_1", 0, values)
@@ -466,6 +483,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._speed_msg(1)))
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
+    self.assertTrue(self._rx(self._das_4_msg()))
 
   def _refresh_safe_source(self, time_us, speed=0.0, counter=1):
     self.safety.set_timer(time_us)
@@ -475,6 +493,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._speed_msg(speed)))
     self.assertTrue(self._rx(self._user_gas_msg(0)))
     self.assertTrue(self._rx(self._user_brake_msg(False)))
+    self.assertTrue(self._rx(self._das_4_msg()))
 
   def _tx_private_cycle(self, counter, time_us, decel_raw=4094,
                         command_type=0, torque_raw=2000,
@@ -634,7 +653,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     )
     self.assertEqual(
       self._tx_private_cycle(
-        15, 20_000, torque_raw=4000, engine_request=True,
+        15, 20_000, torque_raw=3760, engine_request=True,
       ),
       (True, True, True),
     )
@@ -729,6 +748,82 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertEqual(
       self._tx_private_cycle(2, 1_080_000, enable=True),
       (True, True, True),
+    )
+
+  def test_b6w_running_torque_ceiling_is_440_nm(self):
+    self._enable_safe_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=3760, engine_request=True,
+      ),
+      (True, True, True),
+    )
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=3761, engine_request=True,
+      ),
+      (True, True, False),
+    )
+
+  def test_b6w_dashboard_fault_fails_closed_and_requires_rearm(self):
+    self._reset_long_shadow(diagnostic=True, actuation=True)
+    self.safety.set_timer(1_000_000)
+    self._enable_safe_source(counter=1)
+    self.assertEqual(
+      self._tx_private_cycle(0, 1_000_000, enable=True),
+      (True, True, True),
+    )
+
+    self.assertTrue(self._rx(self._das_4_msg(faulted=True)))
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+    rejected = self._private_brake_msg(1)
+    self.safety.set_timer(1_020_000)
+    self.assertFalse(self._tx(rejected))
+    self.assertEqual(self._reject_diagnostic(rejected), (0xD7, 34, 0))
+
+    # Clearing the dashboard fault cannot silently restore actuation.
+    self.assertTrue(self._rx(self._das_4_msg()))
+    rejected = self._private_brake_msg(1)
+    self.assertFalse(self._tx(rejected))
+    self.assertEqual(self._reject_diagnostic(rejected), (0xD7, 5, 0))
+
+    self.assertTrue(self._rx(self._physical_button_msg(0, accel=True)))
+    self.assertTrue(self._rx(self._physical_button_msg(1)))
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertEqual(
+      self._tx_private_cycle(1, 1_040_000, enable=True),
+      (True, True, True),
+    )
+
+  def test_b6w_dashboard_source_is_required_and_fresh(self):
+    self._reset_long_shadow(diagnostic=True)
+    self.safety.set_timer(2_000_000)
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=1, ACC_AVAILABLE=1, ACC_ACTIVE=1,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(1)))
+    self.assertTrue(self._rx(self._user_gas_msg(0)))
+    self.assertTrue(self._rx(self._user_brake_msg(False)))
+    missing = self._private_brake_msg(0)
+    self.assertFalse(self._tx(missing))
+    self.assertEqual(self._reject_diagnostic(missing), (0xD7, 35, 0))
+
+    self.assertTrue(self._rx(self._das_4_msg()))
+    self.safety.set_timer(2_000_000 + self.SOURCE_TIMEOUT_US + 1)
+    self.assertTrue(self._rx(self._das_3_msg(
+      counter=2, ACC_AVAILABLE=1, ACC_ACTIVE=1,
+    )))
+    self.assertTrue(self._rx(self._speed_msg(1)))
+    self.assertTrue(self._rx(self._user_gas_msg(0, counter=1)))
+    self.assertTrue(self._rx(self._user_brake_msg(False, counter=1)))
+    stale = self._private_brake_msg(0)
+    self.assertFalse(self._tx(stale))
+    self.assertEqual(
+      self._reject_diagnostic(stale),
+      (0xD7, 36, self.SOURCE_TIMEOUT_US + 1),
     )
 
   def test_long_rearm_requires_clean_press_and_release(self):
