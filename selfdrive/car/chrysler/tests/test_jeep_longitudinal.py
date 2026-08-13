@@ -41,6 +41,7 @@ jeep_factory_sng_lead_moving = LONG.jeep_factory_sng_lead_moving
 jeep_factory_sng_vision_lead_moving = LONG.jeep_factory_sng_vision_lead_moving
 jeep_long_actuation_enabled = LONG.jeep_long_actuation_enabled
 jeep_long_mode_safety_param = LONG.jeep_long_mode_safety_param
+select_jeep_longitudinal_mode = LONG.select_jeep_longitudinal_mode
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 engine_torque_max_for_speed = LONG.engine_torque_max_for_speed
@@ -210,6 +211,45 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(jeep_long_actuation_enabled(False))
     self.assertFalse(jeep_long_actuation_enabled(True))
 
+  def test_restart_gated_mode_selector_is_mutually_exclusive(self):
+    expected = {
+      (False, False, False): "factory",
+      (False, False, True): "factory",
+      (False, True, False): "factory_stop_and_go",
+      (False, True, True): "factory_stop_and_go",
+      (True, False, False): "experimental_shadow",
+      (True, False, True): "experimental",
+      (True, True, False): "experimental_shadow",
+      (True, True, True): "experimental",
+    }
+    for inputs, expected_name in expected.items():
+      experimental, factory_sng, compiled = inputs
+      with self.subTest(inputs=inputs):
+        mode = select_jeep_longitudinal_mode(
+          experimental, factory_sng, compiled,
+        )
+        self.assertEqual(mode.name, expected_name)
+        self.assertEqual(mode.factory_acc, not mode.openpilot_long)
+        self.assertEqual(
+          sum((mode.factory_stop_and_go, mode.openpilot_long)),
+          1 if expected_name in ("factory_stop_and_go", "experimental") else 0,
+        )
+        self.assertEqual(
+          mode.conflicting_toggles,
+          experimental and factory_sng,
+        )
+
+  def test_shadow_experimental_request_keeps_factory_vehicle_owner(self):
+    mode = select_jeep_longitudinal_mode(
+      experimental_long=True,
+      custom_stock_long=True,
+      actuation_compiled=False,
+    )
+    self.assertTrue(mode.factory_acc)
+    self.assertTrue(mode.experimental_shadow)
+    self.assertFalse(mode.factory_stop_and_go)
+    self.assertFalse(mode.openpilot_long)
+
   def test_b7o_omits_vehicle_flags_with_actuation_compiled_out(self):
     base = 0x80
     shadow, diagnostic, actuation = 0x01, 0x02, 0x04
@@ -320,7 +360,12 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       interface_source,
     )
     self.assertIn(
-      "jeep_op_long = jeep_long_actuation_enabled(experimental_long)",
+      "jeep_long_mode = select_jeep_longitudinal_mode(",
+      interface_source,
+    )
+    self.assertIn("jeep_op_long = jeep_long_mode.openpilot_long", interface_source)
+    self.assertIn(
+      "jeep_factory_sng = jeep_long_mode.factory_stop_and_go",
       interface_source,
     )
     self.assertIn(

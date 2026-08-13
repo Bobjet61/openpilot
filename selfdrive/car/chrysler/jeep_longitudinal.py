@@ -112,6 +112,71 @@ if (
   raise RuntimeError("Jeep longitudinal diagnostics require shadow transport")
 
 
+@dataclass(frozen=True)
+class JeepLongitudinalModeSelection:
+  name: str
+  factory_acc: bool
+  factory_stop_and_go: bool
+  openpilot_long: bool
+  experimental_shadow: bool
+  conflicting_toggles: bool
+
+
+def select_jeep_longitudinal_mode(
+    experimental_long,
+    custom_stock_long,
+    actuation_compiled=None,
+):
+  """Resolve the restart-gated Jeep longitudinal mode in one place.
+
+  Experimental takes precedence when both offroad toggles are selected, but a
+  non-actuating build never hands the vehicle to openpilot. It instead records
+  the experimental request in shadow while factory ACC remains the sole moving
+  longitudinal owner. Factory stop/go is deliberately disabled in that state
+  so two augmentation paths can never be armed together.
+  """
+  if actuation_compiled is None:
+    actuation_compiled = JEEP_LONG_ACTUATION_COMPILED
+  experimental_requested = bool(experimental_long)
+  factory_sng_requested = bool(custom_stock_long)
+  conflicting_toggles = experimental_requested and factory_sng_requested
+  if experimental_requested:
+    if actuation_compiled:
+      return JeepLongitudinalModeSelection(
+        name="experimental",
+        factory_acc=False,
+        factory_stop_and_go=False,
+        openpilot_long=True,
+        experimental_shadow=False,
+        conflicting_toggles=conflicting_toggles,
+      )
+    return JeepLongitudinalModeSelection(
+      name="experimental_shadow",
+      factory_acc=True,
+      factory_stop_and_go=False,
+      openpilot_long=False,
+      experimental_shadow=True,
+      conflicting_toggles=conflicting_toggles,
+    )
+  if factory_sng_requested:
+    return JeepLongitudinalModeSelection(
+      name="factory_stop_and_go",
+      factory_acc=True,
+      factory_stop_and_go=True,
+      openpilot_long=False,
+      experimental_shadow=False,
+      conflicting_toggles=False,
+    )
+  return JeepLongitudinalModeSelection(
+    name="factory",
+    factory_acc=True,
+    factory_stop_and_go=False,
+    openpilot_long=False,
+    experimental_shadow=False,
+    conflicting_toggles=False,
+  )
+
+
 def jeep_long_actuation_enabled(experimental_long):
   """Enable Jeep openpilot-long only from the offroad alpha toggle.
 
@@ -119,7 +184,10 @@ def jeep_long_actuation_enabled(experimental_long):
   live onroad ownership switch: changing it requires a comma restart before
   CarParams and both Panda safety configurations can change together.
   """
-  return JEEP_LONG_ACTUATION_COMPILED and bool(experimental_long)
+  return select_jeep_longitudinal_mode(
+    experimental_long,
+    custom_stock_long=False,
+  ).openpilot_long
 
 
 def jeep_long_mode_safety_param(

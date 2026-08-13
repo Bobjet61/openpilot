@@ -2,7 +2,11 @@
 from cereal import car
 from panda import Panda
 from openpilot.selfdrive.car import create_button_events, get_safety_config, create_mads_event
-from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JEEP_LONG_ACTUATION_COMPILED, jeep_long_actuation_enabled, jeep_long_mode_safety_param
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
+  JEEP_LONG_ACTUATION_COMPILED,
+  jeep_long_mode_safety_param,
+  select_jeep_longitudinal_mode,
+)
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_HD, RAM_DT, RAM_CARS, ChryslerFlags, ChryslerFlagsSP, BUTTON_STATES
 from openpilot.selfdrive.car.interfaces import CarInterfaceBase
 from openpilot.common.params import Params
@@ -67,9 +71,12 @@ class CarInterface(CarInterfaceBase):
     # Jeep
     elif candidate in (CAR.JEEP_GRAND_CHEROKEE, CAR.JEEP_GRAND_CHEROKEE_2019):
       ret.steerActuatorDelay = 0.2
-      jeep_op_long = jeep_long_actuation_enabled(experimental_long)
-      jeep_factory_sng = (not jeep_op_long and
-                          Params().get_bool("CustomStockLong"))
+      jeep_long_mode = select_jeep_longitudinal_mode(
+        experimental_long,
+        Params().get_bool("CustomStockLong"),
+      )
+      jeep_op_long = jeep_long_mode.openpilot_long
+      jeep_factory_sng = jeep_long_mode.factory_stop_and_go
       ret.customStockLongAvailable = True
       # This must match the embedded Panda's Jeep-only rate-5 safety envelope.
       # Maximum torque and the real-time delta remain at their stock limits.

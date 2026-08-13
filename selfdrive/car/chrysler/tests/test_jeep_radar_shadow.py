@@ -183,14 +183,14 @@ class TestJeepRadarShadow(unittest.TestCase):
         ),
       )
 
-  def test_b6x_keeps_guarded_longitudinal_transport_compiled_on(self):
+  def test_b7o_keeps_transport_on_but_vehicle_actuation_off(self):
     long_source = LONG_PATH.read_text(encoding="utf-8")
     self.assertIn(
       "JEEP_LONG_SHADOW_TRANSPORT_COMPILED = True",
       long_source,
     )
     self.assertIn(
-      "JEEP_LONG_ACTUATION_COMPILED = True",
+      "JEEP_LONG_ACTUATION_COMPILED = False",
       long_source,
     )
 
