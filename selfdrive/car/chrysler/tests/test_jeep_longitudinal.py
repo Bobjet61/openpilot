@@ -198,19 +198,19 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(diagnostic.stock_valid)
     self.assertEqual(diagnostic.stock_fault, 0)
 
-  def test_b6q_enables_independently_guarded_transport_and_actuation(self):
-    self.assertTrue(JEEP_LONG_ACTUATION_COMPILED)
+  def test_b7o_keeps_transport_diagnostics_but_disables_actuation(self):
+    self.assertFalse(JEEP_LONG_ACTUATION_COMPILED)
     self.assertTrue(JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED)
     self.assertTrue(JEEP_LONG_SHADOW_TRANSPORT_COMPILED)
     result = JeepLongitudinalShadow().update(-1.0, eligible=True)
     self.assertTrue(result.transport_enabled)
-    self.assertTrue(result.host_enabled)
+    self.assertFalse(result.host_enabled)
 
-  def test_b7f_offroad_toggle_selects_factory_or_openpilot_long(self):
+  def test_b7o_offroad_toggle_cannot_enable_actuation(self):
     self.assertFalse(jeep_long_actuation_enabled(False))
-    self.assertTrue(jeep_long_actuation_enabled(True))
+    self.assertFalse(jeep_long_actuation_enabled(True))
 
-  def test_b7f_factory_mode_omits_every_longitudinal_safety_flag(self):
+  def test_b7o_omits_vehicle_flags_with_actuation_compiled_out(self):
     base = 0x80
     shadow, diagnostic, actuation = 0x01, 0x02, 0x04
     self.assertEqual(
@@ -223,7 +223,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       jeep_long_mode_safety_param(
         base, True, shadow, diagnostic, actuation,
       ),
-      base | shadow | diagnostic | actuation,
+      base,
     )
 
   def test_factory_sng_resume_requires_vision_and_radar_agreement(self):
@@ -485,7 +485,9 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
 
   def test_b6o_adds_all_independent_longitudinal_safety_flags(self):
     self.assertEqual(jeep_long_shadow_safety_param(0, 4), 4)
-    self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 116)
+    self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 52)
+    with patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", True):
+      self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 116)
     with patch.object(LONG, "JEEP_LONG_ACTUATION_COMPILED", False):
       self.assertEqual(jeep_long_shadow_safety_param(32, 4, 16, 64), 52)
     with patch.object(LONG, "JEEP_LONG_SHADOW_TRANSPORT_COMPILED", False):
@@ -1065,7 +1067,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     for expected_counter in (0, 1):
       active = shadow.update(-0.5, eligible=True, speed_mps=15.0)
       self.assertTrue(active.transport_enabled)
-      self.assertTrue(active.host_enabled)
+      self.assertFalse(active.host_enabled)
       self.assertEqual(
         scheduler.next_counter(now, active.transport_enabled),
         expected_counter,
