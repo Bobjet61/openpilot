@@ -67,7 +67,12 @@ class Car:
       self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.ENABLE_MADS
       self.CP.alternativeExperience |= ALTERNATIVE_EXPERIENCE.MADS_DISABLE_DISENGAGE_LATERAL_ON_BRAKE
 
-    if self.CP.customStockLongAvailable and self.CP.pcmCruise and self.params.get_bool("CustomStockLong"):
+    jeep_factory_sng = (
+      self.CP.carName == "chrysler" and
+      bool(self.CP.spFlags & 4)
+    )
+    if (self.CP.customStockLongAvailable and self.CP.pcmCruise and
+        self.params.get_bool("CustomStockLong") and not jeep_factory_sng):
       self.CP.pcmCruiseSpeed = False
 
     openpilot_enabled_toggle = self.params.get_bool("OpenpilotEnabledToggle")

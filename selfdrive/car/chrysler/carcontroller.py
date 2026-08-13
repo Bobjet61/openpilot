@@ -9,12 +9,13 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
-from openpilot.selfdrive.car.chrysler.jeep_radar_assist import JeepRadarLongitudinalAssist
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   JEEP_LONG_ACTUATION_COMPILED,
   JeepLongitudinalShadow,
   JeepLongitudinalTransportScheduler,
+  jeep_factory_sng_lead_moving,
+  jeep_factory_sng_vision_lead_moving,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
@@ -30,6 +31,12 @@ JEEP_LONG_CARS = {
 }
 
 B6Y_STANDSTILL_HOLD_DECEL = -2.0
+B6Y_LEAD_CONFIRM_CYCLES = 3
+B6Y_VISION_LEAD_CONFIRM_CYCLES = 5
+B6Y_RESUME_RETRY_FRAMES = 150
+B6Y_RESUME_MAX_ATTEMPTS = 3
+B6Y_RESUME_PULSE_COUNTERS = 6
+JEEP_LKAS_ENABLE_CONFIRM_FRAMES = 50
 
 
 class CarController(CarControllerBase):
@@ -41,9 +48,17 @@ class CarController(CarControllerBase):
     self.hud_count = 0
     self.last_lkas_falling_edge = 0
     self.lkas_control_bit_prev = False
+    self.jeep_lkas_enable_request_frame = -1
     self.last_button_frame = 0
     self.b6y_last_das_3_counter = -1
     self.b6y_last_resume_frame = -100
+    self.b6y_lead_moving_frames = 0
+    self.b6y_vision_lead_moving_frames = 0
+    self.b6y_minimum_held_lead_distance = float("inf")
+    self.b6y_approach_armed = False
+    self.jeep_radar_shadow_updated = False
+    self.b6y_resume_attempts = 0
+    self.b6y_resume_pulse_remaining = 0
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
@@ -66,11 +81,6 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_selection = None
     self.jeep_radar_shadow_vision = None
     self.jeep_radar_shadow_reason_counts = Counter()
-    self.jeep_radar_assist = (
-      JeepRadarLongitudinalAssist()
-      if CP.carFingerprint in JEEP_LONG_CARS else None
-    )
-    self.jeep_radar_assist_result = None
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -172,28 +182,16 @@ class CarController(CarControllerBase):
       jeep_long_vehicle_reason,
     )
     if self.frame % 2 == 0:
-      planner_requested_accel = (
+      requested_accel = (
         CC.actuators.accel
-        if JEEP_LONG_ACTUATION_COMPILED else (
+        if (
+          JEEP_LONG_ACTUATION_COMPILED
+          and self.CP.openpilotLongitudinalControl
+        ) else (
           self.jeep_long_plan_result.controller_accel_mps2
           if self.jeep_long_plan_result is not None else 0.0
         )
       )
-      if self.jeep_radar_assist is not None:
-        self.jeep_radar_assist_result = self.jeep_radar_assist.update(
-          planner_accel_mps2=planner_requested_accel,
-          speed_mps=CS.out.vEgo,
-          eligible=jeep_long_vehicle_eligible,
-          selection=self.jeep_radar_shadow_selection,
-          vision=self.jeep_radar_shadow_vision,
-          radar_cycle=CS.jeep_radar_shadow.cycle_count,
-          now_nanos=now_nanos,
-        )
-        requested_accel = (
-          self.jeep_radar_assist_result.requested_accel_mps2
-        )
-      else:
-        requested_accel = planner_requested_accel
       # CC.actuators.accel is already the output of openpilot's production
       # longitudinal controller. The separate plan subscriber remains useful
       # for telemetry, but its transient service-valid flag must not reset the
@@ -204,28 +202,33 @@ class CarController(CarControllerBase):
         CS.out.vEgo,
         CC.orientationNED[1] if len(CC.orientationNED) > 1 else float("nan"),
       )
-      self.jeep_long_shadow_frames = []
-      self.jeep_long_transport_frames = []
-      transport_counter = self.jeep_long_transport_scheduler.next_counter(
-        now_nanos,
-        self.jeep_long_envelope.transport_enabled,
-      )
-      if transport_counter is not None:
-        if self.jeep_long_envelope.host_enabled:
-          self.jeep_long_shadow_frames = (
-            chryslercan.create_wp_long_shadow_messages(
-              self.packer, self.jeep_long_envelope, transport_counter)
-          )
-          can_sends.extend(self.jeep_long_shadow_frames)
-          self.jeep_long_shadow.note_transport_sent(
-            self.jeep_long_envelope,
-          )
-        else:
-          self.jeep_long_transport_frames = (
-            chryslercan.create_wp_long_transport_messages(
-              self.packer, transport_counter)
-          )
-          can_sends.extend(self.jeep_long_transport_frames)
+
+    # Offer the most recent 50 Hz envelope on every 100 Hz controller frame.
+    # The monotonic 25 ms scheduler floor produces about 33 Hz without ever
+    # weakening either Panda's watchdog. Current vehicle eligibility is also
+    # checked here so a pedal/door/gear override cannot replay the prior frame.
+    self.jeep_long_shadow_frames = []
+    self.jeep_long_transport_frames = []
+    transport_counter = self.jeep_long_transport_scheduler.next_counter(
+      now_nanos,
+      self.jeep_long_envelope.transport_enabled and jeep_long_vehicle_eligible,
+    )
+    if transport_counter is not None:
+      if self.jeep_long_envelope.host_enabled:
+        self.jeep_long_shadow_frames = (
+          chryslercan.create_wp_long_shadow_messages(
+            self.packer, self.jeep_long_envelope, transport_counter)
+        )
+        can_sends.extend(self.jeep_long_shadow_frames)
+        self.jeep_long_shadow.note_transport_sent(
+          self.jeep_long_envelope,
+        )
+      else:
+        self.jeep_long_transport_frames = (
+          chryslercan.create_wp_long_transport_messages(
+            self.packer, transport_counter)
+        )
+        can_sends.extend(self.jeep_long_transport_frames)
 
     if self.frame % 100 == 0 and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       cloudlog.info(
@@ -249,7 +252,6 @@ class CarController(CarControllerBase):
       self.log_wp_long_diagnostic(CS)
       self.log_jeep_long_plan_shadow(CS)
       self.log_jeep_radar_shadow(CS)
-      self.log_jeep_radar_assist()
       self.log_jeep_steering_shadow()
       self.log_jeep_steering_rate5_shadow()
 
@@ -297,6 +299,9 @@ class CarController(CarControllerBase):
           elif button_counter_offset is not None:
             can_sends.append(chryslercan.create_cruise_buttons(self.packer, CS.button_counter + button_counter_offset, das_bus, self.CP, buttons=self.cruise_button))
 
+    if self.CP.spFlags & ChryslerFlagsSP.SP_JEEP_FACTORY_SNG:
+      self.update_b6y_standstill_hold(CC, CS, can_sends)
+
     # HUD alerts
     if self.frame % 25 == 0:
       if CS.lkas_car_model != -1:
@@ -315,7 +320,28 @@ class CarController(CarControllerBase):
         if (self.CP.minEnableSpeed >= 14.5) and (CS.out.gearShifter != 2):
           lkas_control_bit = False
       elif self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
-        lkas_control_bit = CC.latActive and CS.out.gearShifter in FORWARD_GEARS
+        jeep_lkas_requested = (
+          CC.latActive
+          and CS.out.gearShifter in FORWARD_GEARS
+          and not CS.out.steerFaultTemporary
+          and not CS.out.steerFaultPermanent
+        )
+        if not jeep_lkas_requested:
+          self.jeep_lkas_enable_request_frame = -1
+          lkas_control_bit = False
+        elif self.lkas_control_bit_prev:
+          lkas_control_bit = True
+        else:
+          if self.jeep_lkas_enable_request_frame < 0:
+            self.jeep_lkas_enable_request_frame = self.frame
+          # The route-56 fault followed an LKAS enable pulse lasting only two
+          # command cycles during an ACC/mode-button transition. Require the
+          # lateral request to remain stable before presenting a rising edge
+          # to the EPS; falling edges and driver/fault revocation stay immediate.
+          lkas_control_bit = (
+            self.frame - self.jeep_lkas_enable_request_frame
+            >= JEEP_LKAS_ENABLE_CONFIRM_FRAMES
+          )
       elif CS.out.vEgo > self.CP.minSteerSpeed:
         lkas_control_bit = True
       elif self.CP.flags & ChryslerFlags.HIGHER_MIN_STEERING_SPEED:
@@ -387,29 +413,53 @@ class CarController(CarControllerBase):
 
   def update_b6y_standstill_hold(self, CC, CS, can_sends):
     """Bridge the stock ACC standstill timeout with the proven b6 brake hold."""
-    if not self.CP.openpilotLongitudinalControl or not CS.das_3:
+    factory_sng = bool(
+      self.CP.spFlags & ChryslerFlagsSP.SP_JEEP_FACTORY_SNG
+    )
+    if not factory_sng or not CS.das_3:
       return
 
     counter = CS.das_3.get("COUNTER")
     counter_changed = counter != self.b6y_last_das_3_counter
     self.b6y_last_das_3_counter = counter
 
-    if (not CS.b6y_hold_active and CC.enabled and CC.longActive and
-        CS.cruise_active_actual and CS.acc_decelerating and
+    approach_eligible = (
+      CC.enabled and CS.cruise_active_actual and CS.acc_decelerating
+      and CS.out.vEgo < 3.0 and not CS.out.accFaulted and not CS.out.stockAeb
+    )
+    if approach_eligible:
+      self.b6y_approach_armed = True
+    elif (CC.cruiseControl.cancel or CS.out.gasPressed or
+          CS.out.vEgo > 5.0 or CS.out.accFaulted or CS.out.stockAeb):
+      self.b6y_approach_armed = False
+
+    if (not CS.b6y_hold_active and self.b6y_approach_armed and CC.enabled and
         CS.out.standstill and not CS.out.accFaulted and
         not CS.out.stockAeb):
       CS.b6y_hold_active = True
-      self.b6y_last_resume_frame = self.frame - 10
+      self.b6y_last_resume_frame = self.frame - B6Y_RESUME_RETRY_FRAMES
+      self.b6y_lead_moving_frames = 0
+      self.b6y_vision_lead_moving_frames = 0
+      self.b6y_minimum_held_lead_distance = float("inf")
+      self.b6y_resume_attempts = 0
+      self.b6y_resume_pulse_remaining = 0
       cloudlog.info(
         "B6Y hold: armed after stock ACC decelerated to standstill"
       )
 
     if (CS.b6y_hold_active and
-        (not CC.enabled or CC.cruiseControl.cancel or
+        (CC.cruiseControl.cancel or
          CS.out.gasPressed or CS.out.brakePressed or
          not CS.forward_gear or not CS.out.standstill or
+         not CS.out.cruiseState.available or
          CS.out.accFaulted or CS.out.stockAeb)):
       CS.b6y_hold_active = False
+      self.b6y_lead_moving_frames = 0
+      self.b6y_vision_lead_moving_frames = 0
+      self.b6y_minimum_held_lead_distance = float("inf")
+      self.b6y_approach_armed = False
+      self.b6y_resume_attempts = 0
+      self.b6y_resume_pulse_remaining = 0
       cloudlog.info("B6Y hold: released")
       return
 
@@ -423,9 +473,66 @@ class CarController(CarControllerBase):
       CS.das_3,
     ))
 
-    # This asks stock ACC to re-enter control; it is not a propulsion command.
-    # b8y's private engine-torque path remains blocked until the Jeep is moving.
-    if self.frame - self.b6y_last_resume_frame >= 10:
+    selection = self.jeep_radar_shadow_selection
+    vision = self.jeep_radar_shadow_vision
+    lead_moving = (
+      selection is not None and selection.reason == "selected" and
+      selection.track is not None and vision is not None and
+      jeep_factory_sng_lead_moving(
+        vision.status, vision.d_rel, vision.v_rel, vision.model_prob,
+        selection.track.d_rel, selection.track.v_rel,
+      )
+    )
+    if self.jeep_radar_shadow_updated:
+      if (vision is not None and vision.status and
+          vision.model_prob >= 0.90 and
+          2.0 <= vision.d_rel <= 25.0):
+        self.b6y_minimum_held_lead_distance = min(
+          self.b6y_minimum_held_lead_distance, vision.d_rel,
+        )
+      self.b6y_lead_moving_frames = (
+        min(B6Y_LEAD_CONFIRM_CYCLES, self.b6y_lead_moving_frames + 1)
+        if lead_moving else 0
+      )
+      vision_lead_moving = (
+        vision is not None and jeep_factory_sng_vision_lead_moving(
+          vision.status, vision.d_rel, vision.v_rel, vision.model_prob,
+          self.b6y_minimum_held_lead_distance,
+        )
+      )
+      self.b6y_vision_lead_moving_frames = (
+        min(B6Y_VISION_LEAD_CONFIRM_CYCLES,
+            self.b6y_vision_lead_moving_frames + 1)
+        if vision_lead_moving else 0
+      )
+
+    # A single RESUME frame is followed by the stock SCCM release frame. Retry
+    # at most three times, 1.5 seconds apart, and only while independent vision
+    # and raw-radar observations continue to agree that the lead is moving.
+    resume_ready = (
+      self.b6y_lead_moving_frames >= B6Y_LEAD_CONFIRM_CYCLES
+      or self.b6y_vision_lead_moving_frames >= B6Y_VISION_LEAD_CONFIRM_CYCLES
+    )
+    retry_ready = self.frame - self.b6y_last_resume_frame >= B6Y_RESUME_RETRY_FRAMES
+    if (resume_ready and retry_ready and
+        self.b6y_resume_attempts < B6Y_RESUME_MAX_ATTEMPTS and
+        self.b6y_resume_pulse_remaining == 0):
+      self.b6y_resume_pulse_remaining = B6Y_RESUME_PULSE_COUNTERS
+      self.b6y_last_resume_frame = self.frame
+      self.b6y_resume_attempts += 1
+      cloudlog.info(
+        f"B6Y hold: RESUME pulse attempt={self.b6y_resume_attempts}"
+      )
+
+    driver_button_pressed = any(CS.buttonStates.get(name, False) for name in BUTTONS_STATES)
+    if driver_button_pressed:
+      self.b6y_resume_pulse_remaining = 0
+
+    # The Jeep ignored a single 20 ms synthesized RESUME frame in route 5d.
+    # A physical press that it recognized occupied seven consecutive SCCM
+    # counters. Emit six fresh, counter-synchronized frames per bounded attempt.
+    if (self.b6y_resume_pulse_remaining > 0 and counter_changed and
+        not driver_button_pressed):
       can_sends.append(chryslercan.create_cruise_buttons(
         self.packer,
         CS.button_counter + 1,
@@ -433,7 +540,7 @@ class CarController(CarControllerBase):
         self.CP,
         resume=True,
       ))
-      self.b6y_last_resume_frame = self.frame
+      self.b6y_resume_pulse_remaining -= 1
 
     if self.frame % 50 == 0:
       cloudlog.info(
@@ -443,6 +550,8 @@ class CarController(CarControllerBase):
   def jeep_long_vehicle_eligibility(self, CC, CS):
     if self.CP.carFingerprint not in JEEP_LONG_CARS:
       return False, "unsupported_vehicle"
+    if not self.CP.openpilotLongitudinalControl:
+      return False, "factory_acc_mode"
     if not self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20:
       return False, "white_panda_flag_missing"
     if not CC.enabled:
@@ -502,6 +611,7 @@ class CarController(CarControllerBase):
     )
 
   def update_jeep_radar_shadow(self, CS):
+    self.jeep_radar_shadow_updated = False
     if self.jeep_radar_shadow_sm is None:
       return
 
@@ -510,6 +620,7 @@ class CarController(CarControllerBase):
     if radar_shadow.cycle_count == self.jeep_radar_shadow_last_cycle:
       return
     self.jeep_radar_shadow_last_cycle = radar_shadow.cycle_count
+    self.jeep_radar_shadow_updated = True
 
     radar_state_valid = (
       self.jeep_radar_shadow_sm.seen["radarState"]
@@ -657,21 +768,6 @@ class CarController(CarControllerBase):
       f"window={reason_counts},last={last_result}"
     )
     self.jeep_radar_shadow_reason_counts.clear()
-
-  def log_jeep_radar_assist(self):
-    result = self.jeep_radar_assist_result
-    if result is None:
-      return
-    cloudlog.info(
-      f"Jeep radar assist: active={result.active},"
-      f"mode={result.mode},"
-      f"confirmed={result.match_confirmed},"
-      f"planner_a={result.planner_accel_mps2:.3f},"
-      f"target_a={result.target_accel_mps2:.3f},"
-      f"requested_a={result.requested_accel_mps2:.3f},"
-      f"radar_d={result.radar_d_rel:.2f},"
-      f"radar_v={result.radar_v_rel:.2f}"
-    )
 
   def log_jeep_steering_shadow(self):
     if self.jeep_steering_shadow is None:

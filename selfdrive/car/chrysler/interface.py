@@ -2,9 +2,10 @@
 from cereal import car
 from panda import Panda
 from openpilot.selfdrive.car import create_button_events, get_safety_config, create_mads_event
-from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JEEP_LONG_ACTUATION_COMPILED, jeep_long_shadow_safety_param
+from openpilot.selfdrive.car.chrysler.jeep_longitudinal import JEEP_LONG_ACTUATION_COMPILED, jeep_long_actuation_enabled, jeep_long_mode_safety_param
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_HD, RAM_DT, RAM_CARS, ChryslerFlags, ChryslerFlagsSP, BUTTON_STATES
 from openpilot.selfdrive.car.interfaces import CarInterfaceBase
+from openpilot.common.params import Params
 
 ButtonType = car.CarState.ButtonEvent.Type
 EventName = car.CarEvent.EventName
@@ -66,15 +67,23 @@ class CarInterface(CarInterfaceBase):
     # Jeep
     elif candidate in (CAR.JEEP_GRAND_CHEROKEE, CAR.JEEP_GRAND_CHEROKEE_2019):
       ret.steerActuatorDelay = 0.2
+      jeep_op_long = jeep_long_actuation_enabled(experimental_long)
+      jeep_factory_sng = (not jeep_op_long and
+                          Params().get_bool("CustomStockLong"))
+      ret.customStockLongAvailable = True
       # This must match the embedded Panda's Jeep-only rate-5 safety envelope.
       # Maximum torque and the real-time delta remain at their stock limits.
       ret.safetyConfigs[0].safetyParam |= Panda.FLAG_CHRYSLER_JEEP_RATE5
-      ret.safetyConfigs[0].safetyParam = jeep_long_shadow_safety_param(
+      ret.safetyConfigs[0].safetyParam = jeep_long_mode_safety_param(
         ret.safetyConfigs[0].safetyParam,
+        experimental_long,
         Panda.FLAG_CHRYSLER_JEEP_LONG_SHADOW,
         Panda.FLAG_CHRYSLER_JEEP_LONG_DIAGNOSTIC,
         Panda.FLAG_CHRYSLER_JEEP_LONG_ACTUATION,
       )
+      if jeep_factory_sng:
+        ret.safetyConfigs[0].safetyParam |= Panda.FLAG_CHRYSLER_JEEP_FACTORY_SNG
+        ret.spFlags |= ChryslerFlagsSP.SP_JEEP_FACTORY_SNG.value
       # b6q owns the openpilot engagement state instead of mirroring the
       # factory ACC_ACTIVE bit. This delays the guarded factory-CANCEL
       # handoff until the SET/RES button release that enables openpilot, so a
@@ -82,8 +91,28 @@ class CarInterface(CarInterfaceBase):
       # existing pcmCruiseSpeed setting to avoid sending factory speed-sync
       # button presses while openpilot owns longitudinal control.
       ret.experimentalLongitudinalAvailable = JEEP_LONG_ACTUATION_COMPILED
-      ret.openpilotLongitudinalControl = JEEP_LONG_ACTUATION_COMPILED
-      ret.pcmCruise = not JEEP_LONG_ACTUATION_COMPILED
+      ret.openpilotLongitudinalControl = jeep_op_long
+      ret.pcmCruise = not jeep_op_long
+
+      if jeep_op_long:
+        # Chrysler has no upstream openpilot-long tune, so the generic
+        # Kp=Ki=1, zero-deadband defaults were driving the delayed diesel
+        # torque/brake mapper into a cruise-speed limit cycle. Identical-input
+        # replay of the two b6w drives selected this moderate feedback-only
+        # change: total output variation fell about 25%, steady-cruise
+        # variation fell about 36%, and full output remained available for
+        # every recorded large speed deficit. Planner feed-forward stays 1.0.
+        ret.longitudinalTuning.deadzoneBP = [0.0]
+        ret.longitudinalTuning.deadzoneV = [0.1]
+        ret.longitudinalTuning.kf = 1.0
+        ret.longitudinalTuning.kpBP = [0.0]
+        ret.longitudinalTuning.kpV = [0.6]
+        ret.longitudinalTuning.kiBP = [0.0]
+        ret.longitudinalTuning.kiV = [0.2]
+        # Existing qlogs are too sparse for causal lag identification. Keep
+        # the upstream 0.15 s assumption instead of inventing a new delay.
+        ret.longitudinalActuatorDelayLowerBound = 0.15
+        ret.longitudinalActuatorDelayUpperBound = 0.15
 
       ret.lateralTuning.init('pid')
       # Preserve the existing tune through 20 m/s, then mildly soften the

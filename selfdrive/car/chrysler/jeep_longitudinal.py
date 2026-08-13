@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 import math
 
@@ -31,6 +33,54 @@ WP_LONG_OWNER_STATES = {
   3: "failed",
 }
 
+FACTORY_SNG_LEAD_MIN_DISTANCE_M = 2.0
+FACTORY_SNG_LEAD_MIN_VREL_MPS = 0.5
+FACTORY_SNG_LEAD_MAX_SPEED_DISAGREEMENT_MPS = 1.5
+FACTORY_SNG_VISION_MIN_PROB = 0.90
+FACTORY_SNG_VISION_MAX_DISTANCE_M = 25.0
+FACTORY_SNG_VISION_MIN_VREL_MPS = 0.6
+FACTORY_SNG_VISION_MIN_DISTANCE_GAIN_M = 0.5
+
+
+def jeep_factory_sng_lead_moving(
+    vision_status, vision_d_rel, vision_v_rel, vision_prob,
+    radar_d_rel, radar_v_rel,
+):
+  """Require independent vision/radar agreement before automatic RESUME."""
+  values = (vision_d_rel, vision_v_rel, vision_prob, radar_d_rel, radar_v_rel)
+  return (
+    bool(vision_status)
+    and all(math.isfinite(float(v)) for v in values)
+    and vision_prob >= 0.70
+    and vision_d_rel >= FACTORY_SNG_LEAD_MIN_DISTANCE_M
+    and radar_d_rel >= FACTORY_SNG_LEAD_MIN_DISTANCE_M
+    and vision_v_rel >= FACTORY_SNG_LEAD_MIN_VREL_MPS
+    and radar_v_rel >= FACTORY_SNG_LEAD_MIN_VREL_MPS
+    and abs(vision_v_rel - radar_v_rel) <=
+        FACTORY_SNG_LEAD_MAX_SPEED_DISAGREEMENT_MPS
+    and abs(vision_d_rel - radar_d_rel) <= max(5.0, vision_d_rel * 0.25)
+  )
+
+
+def jeep_factory_sng_vision_lead_moving(
+    vision_status, vision_d_rel, vision_v_rel, vision_prob,
+    minimum_held_distance,
+):
+  """Conservative fallback when the raw-radar association drops at launch."""
+  values = (
+    vision_d_rel, vision_v_rel, vision_prob, minimum_held_distance,
+  )
+  return (
+    bool(vision_status)
+    and all(math.isfinite(float(v)) for v in values)
+    and vision_prob >= FACTORY_SNG_VISION_MIN_PROB
+    and FACTORY_SNG_LEAD_MIN_DISTANCE_M <= vision_d_rel <=
+        FACTORY_SNG_VISION_MAX_DISTANCE_M
+    and vision_v_rel >= FACTORY_SNG_VISION_MIN_VREL_MPS
+    and vision_d_rel - minimum_held_distance >=
+        FACTORY_SNG_VISION_MIN_DISTANCE_GAIN_M
+  )
+
 
 def jeep_acc_faulted(das_3_fault, das_4_fault):
   """Combine both FCA ACC fault sources used by the EcoDiesel."""
@@ -59,15 +109,43 @@ if (
 ):
   raise RuntimeError("Jeep longitudinal diagnostics require shadow transport")
 
+
+def jeep_long_actuation_enabled(experimental_long):
+  """Enable Jeep openpilot-long only from the offroad alpha toggle.
+
+  The toggle is sampled while card fingerprints the vehicle. It is not a
+  live onroad ownership switch: changing it requires a comma restart before
+  CarParams and both Panda safety configurations can change together.
+  """
+  return JEEP_LONG_ACTUATION_COMPILED and bool(experimental_long)
+
+
+def jeep_long_mode_safety_param(
+    current_safety_param,
+    experimental_long,
+    shadow_flag,
+    diagnostic_flag,
+    actuation_flag,
+):
+  """Apply the complete Jeep-long safety group only in openpilot-long mode."""
+  if not jeep_long_actuation_enabled(experimental_long):
+    return current_safety_param
+  return jeep_long_shadow_safety_param(
+    current_safety_param,
+    shadow_flag,
+    diagnostic_flag,
+    actuation_flag,
+  )
+
 # Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
 ACCEL_MIN = -3.0
 # b6r's 5.38% uphill interval stayed at the old 1.25 m/s^2 mapper ceiling
 # while losing 8.24 km/h. A separate stock-ACC uphill capture reached
-# 503.25 Nm median and 535.5 Nm maximum. b6v's dashboard ACC fault asserted
-# while 500 Nm was saturated, whereas an earlier 439.25 Nm peak remained
-# fault-free. Retain the planner envelope while independently capping the
-# request below the observed fault boundary in the host and both Pandas.
+# 503.25 Nm median and 535.5 Nm maximum. The active b6x route asserted the
+# dashboard ACC fault after its output reached 440 Nm, but the fault-free b6w
+# route had both p95 and p99 at the same 440 Nm ceiling. Preserve that proven
+# ceiling while reverting the b6x gain/rise regression below.
 ACCEL_MAX = 1.5
 # Telemetry-only planner classification threshold. b6o actuator mode selection
 # uses the blended hysteresis thresholds below, not this legacy deadband.
@@ -102,10 +180,10 @@ LOW_SPEED_CREEP_TIMEOUT_CYCLES = 75   # 1.5 s before fail-closed re-hold
 
 # The embedded Panda rejects private cycles closer than 15 ms. Even a 20 ms
 # sender interval occasionally arrived below that threshold after USB/CAN
-# scheduling jitter. The controller offers a cycle every 20 ms, so this 25 ms
-# gate deliberately selects every other opportunity (nominally 25 Hz), leaving
-# enough arrival-time margin while the White Panda safely holds a complete
-# command snapshot between the stock 50 Hz DAS_3 frames.
+# scheduling jitter. The controller offers the latest 50 Hz envelope to this
+# gate every 10 ms; the 25 ms floor therefore produces a nominal 30 ms/33 Hz
+# complete triplet. That preserves a 10 ms arrival-time margin while reducing
+# exposure to the White Panda's unchanged 100 ms freshness watchdog.
 # Advance the counter only for cycles actually sent.
 TRANSPORT_MIN_SEND_INTERVAL_NS = 25_000_000
 
@@ -117,10 +195,11 @@ BRAKE_ACCEL_INTERCEPT_MPS2 = -0.2176
 BRAKE_ACCEL_GAIN = 0.8012
 ENGINE_TORQUE_INTERCEPT_NM = 0.0
 ENGINE_TORQUE_ACCEL_GAIN = 163.5
-# The two b6w routes showed a large response deficit below the 440 Nm ceiling.
-# Increase only the positive-request feed-forward; the calibrated base term,
-# low-speed limit, launch limit, and hard maximum remain unchanged.
-ENGINE_TORQUE_POSITIVE_ACCEL_GAIN = 40.0
+# b6x raised this term to 40 Nm/(m/s^2) and raised the torque slew rate at the
+# same time. Its first new vehicle fault occurred at the resulting 440 Nm
+# plateau. Restore the last fault-free b6w feed-forward while isolating the
+# effect of the newly mirrored independent Panda command envelope.
+ENGINE_TORQUE_POSITIVE_ACCEL_GAIN = 16.5
 ENGINE_TORQUE_SPEED_GAIN = 4.5
 # Do not extrapolate the speed term beyond the 25.58 m/s calibration drive.
 ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS = 26.0
@@ -135,9 +214,16 @@ ENGINE_TORQUE_GRADE_MIN_NM = -50.0
 ENGINE_TORQUE_GRADE_MAX_NM = 150.0
 ENGINE_TORQUE_GRADE_MIN_SPEED_MPS = 5.0
 ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD = math.radians(4.0)
-ENGINE_TORQUE_GRADE_FILTER_TAU_S = 0.75
+# Raw body pitch includes short suspension/bump motion as well as road grade.
+# Two-drive replay showed that 1.5 s cuts grade-command variation about 22%
+# and the largest qlog-scale step about 47%, while sustained hills still reach
+# the full 150 Nm feed-forward range.
+ENGINE_TORQUE_GRADE_FILTER_TAU_S = 1.5
 ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM = 250.0
 ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS = 20.0
+# b6w sustained the 440 Nm ceiling without a dashboard fault. Keep that proven
+# authority and separately mirror the speed-shaped low-speed envelope in both
+# Pandas so a corrupt host cannot jump directly to this ceiling at low speed.
 ENGINE_TORQUE_MAX_NM = 440.0
 
 # b6r cut normalized switching 48.8%, but its route still cycled at planner
@@ -154,12 +240,12 @@ BRAKE_IMMEDIATE_ACCEL = -0.75
 BRAKE_ENTRY_CONFIRM_CYCLES = 10
 BRAKE_EXIT_ACCEL = -0.08
 BRAKE_BLEND_FULL_ACCEL = -0.80
-ENGINE_TORQUE_RATE_UP_NM_PER_S = 360.0
+ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
 # A confirmed brake request must retire even the 440 Nm ceiling before the
 # coast interlock can admit braking. The faster brake-transition release is
 # only a withdrawal of requested engine torque; propulsion increases retain
-# the ordinary bounded rate and normal coasting retains 600 Nm/s.
+# the last fault-free 300 Nm/s rate and normal coasting retains 600 Nm/s.
 BRAKE_TRANSITION_TORQUE_RATE_DOWN_NM_PER_S = 1800.0
 BRAKE_APPLY_RATE_MPS3 = 1.5
 BRAKE_RELEASE_RATE_MPS3 = 2.0
@@ -335,6 +421,19 @@ def decode_wp_long_owner_diagnostic(
 
 def clip(value: float, lower: float, upper: float) -> float:
   return min(max(value, lower), upper)
+
+
+def engine_torque_max_for_speed(speed_mps: float) -> float:
+  """Return the host ceiling mirrored by both independent Panda guards."""
+  calibration_speed_mps = clip(
+    speed_mps, 0.0, ENGINE_TORQUE_CALIBRATION_SPEED_MAX_MPS,
+  )
+  return clip(
+    ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM
+    + ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS * calibration_speed_mps,
+    ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM,
+    ENGINE_TORQUE_MAX_NM,
+  )
 
 
 def move_toward(
@@ -519,11 +618,8 @@ class JeepLongitudinalShadow:
           ENGINE_TORQUE_GRADE_MIN_NM,
           ENGINE_TORQUE_GRADE_MAX_NM,
         )
-      speed_limited_torque_max_nm = clip(
-        ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM
-        + ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS * calibration_speed_mps,
-        ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM,
-        ENGINE_TORQUE_MAX_NM,
+      speed_limited_torque_max_nm = engine_torque_max_for_speed(
+        calibration_speed_mps,
       )
       base_engine_torque_nm = clip(
         ENGINE_TORQUE_INTERCEPT_NM
