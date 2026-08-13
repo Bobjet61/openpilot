@@ -99,9 +99,11 @@ JEEP_LONG_REJECT_DIAGNOSTICS_COMPILED = True
 # Independent actuation gate. The embedded Panda and the external White Panda
 # each retain an independent fail-closed gate and validate the complete command
 # envelope before vehicle CAN is modified.
-# b7o development branch: offline/shadow ownership only. This must remain
-# false until replay evidence and a separate reviewed activation commit exist.
-JEEP_LONG_ACTUATION_COMPILED = False
+# b7p activation branch. Vehicle output still requires the offroad Experimental
+# Longitudinal toggle plus fresh eligibility on the host, embedded Panda, and
+# external White Panda. Factory and Factory + Stop/Go modes never set the
+# actuation safety flag and remain non-openpilot longitudinal owners.
+JEEP_LONG_ACTUATION_COMPILED = True
 
 if JEEP_LONG_ACTUATION_COMPILED and not JEEP_LONG_SHADOW_TRANSPORT_COMPILED:
   raise RuntimeError("Jeep longitudinal actuation requires shadow transport")
