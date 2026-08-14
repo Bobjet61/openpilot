@@ -21,11 +21,11 @@ int main(void) {
   assert(chrysler_long_dashboard_fault_from_byte6(0xFFU));
 
   assert(CHRYSLER_LONG_ACTUATION == 1U);
-  assert(chrysler_long_running_torque_max_raw(11) == 3062);
-  assert(chrysler_long_running_torque_max_raw(100) == 3568);
-  assert(chrysler_long_running_torque_max_raw(176) == 3999);
-  assert(chrysler_long_running_torque_max_raw(177) == 4000);
-  assert(chrysler_long_running_torque_max_raw(1000) == 4000);
+  assert(chrysler_long_running_torque_max_raw(11) == 3262);
+  assert(chrysler_long_running_torque_max_raw(100) == 3768);
+  assert(chrysler_long_running_torque_max_raw(112) == 3836);
+  assert(chrysler_long_running_torque_max_raw(113) == 3840);
+  assert(chrysler_long_running_torque_max_raw(1000) == 3840);
 
   // Diagnostic packing preserves the two raw factory DAS_3 words and the
   // exact output engine word in their original byte order.
@@ -210,12 +210,12 @@ int main(void) {
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
-    3568, 100, false, false, false,
+    3768, 100, false, false, false,
     CHRYSLER_LONG_LOW_DRIVE));
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
-    3569, 100, false, false, false,
+    3769, 100, false, false, false,
     CHRYSLER_LONG_LOW_DRIVE));
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
@@ -420,21 +420,26 @@ int main(void) {
     true, 0, true, true, true, false,
     true, true, true, 0, false, true));
 
-  assert(chrysler_factory_sng_suppress_matching_release(
-    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 8, 14000U,
-    true, 8, 1000U, true));
-  assert(!chrysler_factory_sng_suppress_matching_release(
-    CHRYSLER_FACTORY_SNG_BUTTON_RESUME, 8, 14000U,
-    true, 8, 1000U, true));
-  assert(!chrysler_factory_sng_suppress_matching_release(
-    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 9, 14000U,
-    true, 8, 1000U, true));
-  assert(!chrysler_factory_sng_suppress_matching_release(
-    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 8, 16001U,
-    true, 8, 1000U, true));
-  assert(!chrysler_factory_sng_suppress_matching_release(
-    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 8, 14000U,
-    true, 8, 1000U, false));
+  assert(chrysler_factory_sng_capture_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_RESUME, true, 0U));
+  assert(!chrysler_factory_sng_capture_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_RESUME, true, 1U));
+  assert(!chrysler_factory_sng_capture_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, true, 0U));
+  assert(!chrysler_factory_sng_capture_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_RESUME, false, 0U));
+
+  assert(chrysler_factory_sng_replay_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, true,
+    CHRYSLER_FACTORY_SNG_RESUME_REPLAY_FRAMES));
+  assert(!chrysler_factory_sng_replay_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_RESUME, true,
+    CHRYSLER_FACTORY_SNG_RESUME_REPLAY_FRAMES));
+  assert(!chrysler_factory_sng_replay_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, false,
+    CHRYSLER_FACTORY_SNG_RESUME_REPLAY_FRAMES));
+  assert(!chrysler_factory_sng_replay_resume(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, true, 0U));
 
   return 0;
 }

@@ -69,10 +69,8 @@ static uint16_t chrysler_long_diag_stock_engine_word = 0U;
 static uint16_t chrysler_long_diag_output_engine_word = 0U;
 static uint16_t chrysler_long_diag_stock_accel_word = 0U;
 static bool chrysler_factory_sng_hold_valid = false;
-static bool chrysler_factory_sng_resume_latched = false;
 static uint32_t chrysler_factory_sng_last_hold_ts = 0U;
-static uint32_t chrysler_factory_sng_resume_ts = 0U;
-static int chrysler_factory_sng_resume_counter = 0;
+static uint8_t chrysler_factory_sng_resume_replay_frames = 0U;
 
 static void chrysler_steering_update_guard(void) {
   steer_type = chrysler_steer_mode_from_stock_das3(
@@ -521,7 +519,7 @@ static void send_acc_accel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
 static bool send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   chrysler_long_update_guard();
   const uint8_t original_buttons = GET_BYTE(to_fwd, 0);
-  const int button_counter = (GET_BYTE(to_fwd, 1) >> 4) & 0xF;
+  uint8_t arbitrated_buttons = original_buttons;
   const uint32_t now = TIM2->CNT;
   const bool button_checksum_valid =
     (GET_LEN(to_fwd) == 3) &&
@@ -558,26 +556,32 @@ static bool send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
         now, chrysler_long_last_dashboard_ts,
         chrysler_long_dashboard_valid, chrysler_long_dashboard_fault));
 
-  if (chrysler_factory_sng_suppress_matching_release(
-      original_buttons, button_counter, now,
-      chrysler_factory_sng_resume_latched,
-      chrysler_factory_sng_resume_counter,
-      chrysler_factory_sng_resume_ts,
-      factory_resume_context)) {
-    chrysler_factory_sng_resume_latched = false;
+  if (chrysler_factory_sng_capture_resume(
+      original_buttons, factory_resume_context,
+      chrysler_factory_sng_resume_replay_frames)) {
+    chrysler_factory_sng_resume_replay_frames =
+      CHRYSLER_FACTORY_SNG_RESUME_REPLAY_FRAMES;
+    // The host frame raced the already-forwarded physical counter in route 69.
+    // Treat it only as a request; the next fresh SCCM counters carry the press.
     return false;
   }
 
   if (factory_resume_context &&
-      original_buttons == CHRYSLER_FACTORY_SNG_BUTTON_RESUME) {
-    chrysler_factory_sng_resume_latched = true;
-    chrysler_factory_sng_resume_counter = button_counter;
-    chrysler_factory_sng_resume_ts = now;
-  } else if (original_buttons != CHRYSLER_FACTORY_SNG_BUTTON_NONE ||
-             !factory_resume_context ||
-             (chrysler_factory_sng_resume_latched &&
-              button_counter != chrysler_factory_sng_resume_counter)) {
-    chrysler_factory_sng_resume_latched = false;
+      original_buttons == CHRYSLER_FACTORY_SNG_BUTTON_RESUME &&
+      chrysler_factory_sng_resume_replay_frames > 0U) {
+    // Ignore the remaining host copies in the bounded six-frame request.
+    // They must not restart or lengthen the physical-counter replay.
+    return false;
+  }
+
+  if (chrysler_factory_sng_replay_resume(
+      original_buttons, factory_resume_context,
+      chrysler_factory_sng_resume_replay_frames)) {
+    arbitrated_buttons = CHRYSLER_FACTORY_SNG_BUTTON_RESUME;
+    chrysler_factory_sng_resume_replay_frames--;
+  } else if (!factory_resume_context ||
+             original_buttons != CHRYSLER_FACTORY_SNG_BUTTON_NONE) {
+    chrysler_factory_sng_resume_replay_frames = 0U;
   }
 
   // Physical or host-generated Cancel and ACC main presses revoke ownership
@@ -586,7 +590,7 @@ static bool send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     chrysler_long_invalidate_committed_cycle();
   }
   const uint8_t filtered_buttons = chrysler_long_filter_button_byte(
-    original_buttons, chrysler_long_owner_state);
+    arbitrated_buttons, chrysler_long_owner_state);
   chrysler_long_cancel_injected =
     (chrysler_long_owner_state == CHRYSLER_LONG_OWNER_CANCELING) &&
     ((original_buttons & 0x01U) == 0U) &&
@@ -672,7 +676,7 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     if (chrysler_factory_sng_hold_valid) {
       chrysler_factory_sng_last_hold_ts = TIM2->CNT;
     } else {
-      chrysler_factory_sng_resume_latched = false;
+      chrysler_factory_sng_resume_replay_frames = 0U;
     }
   }
 

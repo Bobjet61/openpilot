@@ -41,24 +41,25 @@
 #define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094   // stock no-brake sentinel
 
-// The synchronized b6s road capture used 460.75 Nm without a torque-envelope
-// or dashboard fault, while independent stock captures exceeded 500 Nm uphill.
-// Permit the bounded 500 Nm b7s step without changing the torque rise limit.
-// The running limit below mirrors the host's 250 + 20 * speed_mps envelope
+// Route 68 asserted a DAS_4 ACC fault after 6.2 seconds at 500 Nm. Retain the
+// independently fault-free 460 Nm ceiling and raise only the moving low-speed
+// base. The running limit below mirrors the host's 300 + 20 * speed_mps envelope
 // using SPEED_1's 0.071028 m/s raw scale; 142/25 is a conservative integer
 // approximation of 4 raw/Nm * 20 Nm/(m/s) * 0.071028 m/s/raw.
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
-#define CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW 3000
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 3840
+#define CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW 3200
 #define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_NUM 142
 #define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_DEN 25
 
 // SPEED_1 raw * 0.071028 m/s. Running torque uses the independently measured
 // raw-11 threshold. The complete capture also showed a bounded engine request
-// immediately after GO, so a separate 200 Nm launch ceiling is permitted only
+// immediately after GO, so a separate 320 Nm launch ceiling is permitted only
 // from the guarded CREEP state.
 #define CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW 11  // approximately 0.78 m/s
-#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2800 // 200 Nm
+// 320 Nm after the complete HOLD -> RELEASE -> GO sequence. This is only an
+// independent ceiling; host torque remains request-proportional and rate-limited.
+#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 3280
 #define CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW 12 // approximately 0.85 m/s
 
 // The existing 0x4FF White Panda beacon remains four bytes long. b6h emits it
@@ -103,15 +104,16 @@
 #define CHRYSLER_LONG_LOW_GO_MAX_CYCLES 4U
 
 // Factory + Stop/Go uses the host's exact braking-only DAS_3 bridge and an
-// exact RESUME button. CAN2 isolation makes the White Panda the sole arbiter
-// into the ACC module, so suppress only the SCCM no-button duplicate carrying
-// the same counter immediately after a guarded RESUME.
+// exact RESUME button. Route 69 showed each host RESUME reaching the White
+// Panda after the matching physical no-button counter had already passed.
+// Capture that guarded request and replace the next six fresh SCCM no-button
+// counters, matching the duration of a recognized physical press.
 #define CHRYSLER_FACTORY_SNG_HOLD_TIMEOUT_US 100000U
-#define CHRYSLER_FACTORY_SNG_RELEASE_SUPPRESS_US 15000U
 #define CHRYSLER_FACTORY_SNG_SPEED_MAX_RAW 2
 #define CHRYSLER_FACTORY_SNG_HOLD_DECEL_RAW 2866
 #define CHRYSLER_FACTORY_SNG_BUTTON_NONE 0x00U
 #define CHRYSLER_FACTORY_SNG_BUTTON_RESUME 0x10U
+#define CHRYSLER_FACTORY_SNG_RESUME_REPLAY_FRAMES 6U
 
 static inline bool chrysler_factory_sng_hold_payload_valid(
     const int len,
@@ -163,19 +165,22 @@ static inline bool chrysler_factory_sng_resume_context_valid(
          !stock_collision && dashboard_ready;
 }
 
-static inline bool chrysler_factory_sng_suppress_matching_release(
+static inline bool chrysler_factory_sng_capture_resume(
     const uint8_t buttons,
-    const int counter,
-    const uint32_t now,
-    const bool resume_latched,
-    const int resume_counter,
-    const uint32_t resume_ts,
-    const bool context_valid) {
-  return context_valid && resume_latched &&
+    const bool context_valid,
+    const uint8_t replay_frames_remaining) {
+  return context_valid &&
+         buttons == CHRYSLER_FACTORY_SNG_BUTTON_RESUME &&
+         replay_frames_remaining == 0U;
+}
+
+static inline bool chrysler_factory_sng_replay_resume(
+    const uint8_t buttons,
+    const bool context_valid,
+    const uint8_t replay_frames_remaining) {
+  return context_valid &&
          buttons == CHRYSLER_FACTORY_SNG_BUTTON_NONE &&
-         counter == resume_counter &&
-         (uint32_t)(now - resume_ts) <=
-           CHRYSLER_FACTORY_SNG_RELEASE_SUPPRESS_US;
+         replay_frames_remaining > 0U;
 }
 
 static inline int chrysler_long_running_torque_max_raw(const int speed_raw) {
