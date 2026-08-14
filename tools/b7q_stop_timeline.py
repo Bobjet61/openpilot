@@ -52,7 +52,9 @@ def main():
   state = None
   control = None
   plan = None
-  diag = {"status": None, "failure": None, "owner": None, "stock": None, "stock_fault": None}
+  diag = {"status": None, "failure": None, "counters": None,
+          "stock_engine_word": None, "output_engine_word": None,
+          "owner": None, "stock": None, "stock_fault": None}
   next_sample = args.start
   rows = []
 
@@ -73,8 +75,13 @@ def main():
         if int(frame.src) != 0:
           continue
         dat = bytes(frame.dat)
-        if int(frame.address) == 0x4FF and len(dat) >= 3:
-          diag["status"], diag["failure"] = dat[0], dat[2]
+        if int(frame.address) == 0x4FF and len(dat) >= 4:
+          diag["status"] = dat[0]
+          diag["failure"] = dat[1] | (dat[2] << 8)
+          diag["counters"] = dat[3]
+        elif int(frame.address) == 0x4FE and len(dat) >= 6 and dat[0] == 0xC1 and dat[1] == 1:
+          diag["stock_engine_word"] = (dat[2] << 8) | dat[3]
+          diag["output_engine_word"] = (dat[4] << 8) | dat[5]
         elif int(frame.address) == 0x4FD and len(dat) >= 3:
           diag["owner"], diag["stock"], diag["stock_fault"] = dat[0], dat[1], dat[2]
 
@@ -96,6 +103,7 @@ def main():
       "physical_standstill": bool(state.standstill),
       "cruise_standstill": bool(state.cruiseState.standstill),
       "cruise_enabled": bool(state.cruiseState.enabled),
+      "acc_faulted": bool(state.accFaulted),
       "gas_pressed": bool(state.gasPressed),
       "brake_pressed": bool(state.brakePressed),
       "long_active": bool(control.longActive),
@@ -111,7 +119,13 @@ def main():
       "wp_host_requested": bool(status & 0x2) if status is not None else None,
       "wp_brake_requested": bool(status & 0x4) if status is not None else None,
       "wp_engine_requested": bool(status & 0x8) if status is not None else None,
-      "wp_failure_hex": f"0x{diag['failure']:02x}" if diag["failure"] is not None else None,
+      "wp_failure_hex": f"0x{diag['failure']:04x}" if diag["failure"] is not None else None,
+      "wp_private_counter": (diag["counters"] >> 4) if diag["counters"] is not None else None,
+      "wp_stock_counter": (diag["counters"] & 0xF) if diag["counters"] is not None else None,
+      "wp_stock_engine_active": bool(diag["stock_engine_word"] & 0x8000) if diag["stock_engine_word"] is not None else None,
+      "wp_stock_engine_torque_nm": round((diag["stock_engine_word"] & 0x1FFF) * 0.25 - 500.0, 2) if diag["stock_engine_word"] is not None else None,
+      "wp_output_engine_active": bool(diag["output_engine_word"] & 0x8000) if diag["output_engine_word"] is not None else None,
+      "wp_output_engine_torque_nm": round((diag["output_engine_word"] & 0x1FFF) * 0.25 - 500.0, 2) if diag["output_engine_word"] is not None else None,
       "wp_owner": (owner & 0xF) if owner is not None and (owner & 0xF0) == 0xD0 else None,
       "wp_stock_hex": f"0x{diag['stock']:02x}" if diag["stock"] is not None else None,
       "wp_stock_fault_hex": f"0x{diag['stock_fault']:02x}" if diag["stock_fault"] is not None else None,
@@ -122,7 +136,8 @@ def main():
   args.json.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
   transitions = []
   previous = None
-  keys = ("physical_standstill", "cruise_standstill", "long_state", "wp_status_hex", "wp_failure_hex", "wp_owner", "gas_pressed", "brake_pressed")
+  keys = ("physical_standstill", "cruise_standstill", "acc_faulted", "long_state",
+          "wp_status_hex", "wp_failure_hex", "wp_owner", "gas_pressed", "brake_pressed")
   for row in rows:
     signature = tuple(row[key] for key in keys)
     if signature != previous:

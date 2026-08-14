@@ -15,10 +15,18 @@ from pathlib import Path
 import statistics
 import sys
 import types
+import os
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
   sys.path.append(str(REPO_ROOT))
+
+if sys.platform == "win32" and "openpilot" not in sys.modules:
+  openpilot_package = types.ModuleType("openpilot")
+  openpilot_package.__path__ = [str(REPO_ROOT)]
+  sys.modules["openpilot"] = openpilot_package
+  if not hasattr(os, "register_at_fork"):
+    os.register_at_fork = lambda **_kwargs: None
 
 try:
   import openpilot

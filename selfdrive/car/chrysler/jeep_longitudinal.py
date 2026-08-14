@@ -257,21 +257,34 @@ JERK_DOWN = 2.0
 LOW_SPEED_HOLD_LAUNCH_JERK_UP = 4.0
 
 # The complete factory two-sided capture established the low-speed sequence:
-# braking continues through zero, the stopped state holds -2.0 m/s^2, brake
-# release completes before a short GO pulse, and a bounded engine request can
-# begin immediately after GO. A failed launch attempt re-applies hold and will
-# not retry until the controller first withdraws the launch request.
+# braking continues through zero, brake release completes before a short GO
+# pulse, and a bounded engine request can begin immediately after GO. Route 68
+# crept repeatedly at the earlier -2.0 m/s^2 standstill command; use the
+# already-guarded -3.0 m/s^2 boundary only while latched in HOLD. A failed
+# launch attempt re-applies hold and will not retry until the controller first
+# withdraws the launch request.
 LOW_SPEED_HOLD_ENTRY_MPS = 0.15
 LOW_SPEED_ENGINE_MIN_MPS = 0.78
-LOW_SPEED_HOLD_ACCEL_MPS2 = -2.0
+LOW_SPEED_HOLD_ACCEL_MPS2 = -3.0
 LOW_SPEED_LAUNCH_REQUEST_ACCEL = 0.10
 LOW_SPEED_LAUNCH_RESET_ACCEL = 0.02
-LOW_SPEED_LAUNCH_CONFIRM_CYCLES = 10  # 200 ms at the 50 Hz envelope update
+LOW_SPEED_LAUNCH_CONFIRM_CYCLES = 5   # 100 ms at the 50 Hz envelope update
 LOW_SPEED_GO_PULSE_CYCLES = 5         # 100 ms, matching the OEM capture
+# Route 68 showed a roughly two-second delay between the planner's positive
+# launch request and the first applied engine torque. Most of that delay was
+# the ordinary 2.0 m/s^3 brake-release slew retiring the standstill hold. A
+# confirmed launch may withdraw that hold faster; this cannot increase brake
+# application, cannot overlap engine torque, and still preserves a complete
+# neutral transport cycle plus the captured GO pulse before propulsion.
+LOW_SPEED_HOLD_RELEASE_RATE_MPS3 = 12.0
 # The complete August 5 capture showed that factory engine torque normally
 # begins immediately after GO, before the Jeep reaches 0.78 m/s. Permit only a
 # separately capped, rate-limited launch request after HOLD -> RELEASE -> GO.
-LOW_SPEED_LAUNCH_TORQUE_MAX_NM = 200.0
+# The stock capture's highest observed post-GO request was 246.25 Nm. The
+# calibrated flat-road fit estimates about 321 Nm for openpilot's full
+# 2.0 m/s^2 request. Permit that bounded full-request launch without making it
+# a floor: smaller planner requests still produce proportionally less torque.
+LOW_SPEED_LAUNCH_TORQUE_MAX_NM = 320.0
 LOW_SPEED_LAUNCH_GRADE_MIN_NM = -25.0
 LOW_SPEED_LAUNCH_GRADE_MAX_NM = 50.0
 LOW_SPEED_CREEP_TIMEOUT_CYCLES = 75   # 1.5 s before fail-closed re-hold
@@ -317,14 +330,13 @@ ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD = math.radians(4.0)
 # and the largest qlog-scale step about 47%, while sustained hills still reach
 # the full 150 Nm feed-forward range.
 ENGINE_TORQUE_GRADE_FILTER_TAU_S = 1.5
-ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM = 250.0
+ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM = 300.0
 ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS = 20.0
-# The synchronized b6s road capture used up to 460.75 Nm for 328.82 seconds of
-# active ownership without a torque-envelope or dashboard fault. Separate
-# factory captures reached 503.25 Nm median and 535.5 Nm maximum uphill. Use a
-# bounded 500 Nm next step, mirrored by both Pandas, while retaining the
-# existing speed-shaped low-speed ceiling and 300 Nm/s rise limit.
-ENGINE_TORQUE_MAX_NM = 500.0
+# Route 68 held 500 Nm for 6.2 seconds immediately before DAS_4 asserted an
+# ACC fault. Return to the independently fault-free 460 Nm road-tested ceiling,
+# while the higher low-speed base above improves the accepted post-launch
+# command. Standstill launch has its own separately guarded 320 Nm ceiling.
+ENGINE_TORQUE_MAX_NM = 460.0
 
 # b6r cut normalized switching 48.8%, but its route still cycled at planner
 # requests near -0.14 to -0.19 m/s^2. Offline same-input screening showed that
@@ -342,7 +354,7 @@ BRAKE_EXIT_ACCEL = -0.08
 BRAKE_BLEND_FULL_ACCEL = -0.80
 ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
-# A confirmed brake request must retire even the 500 Nm ceiling before the
+# A confirmed brake request must retire even the propulsion ceiling before the
 # coast interlock can admit braking. The faster brake-transition release is
 # only a withdrawal of requested engine torque; propulsion increases retain
 # the last fault-free 300 Nm/s rate and normal coasting retains 600 Nm/s.
@@ -687,21 +699,32 @@ class JeepLongitudinalShadow:
       self.release_transport_confirmed = False
 
     if eligible and self.low_speed_state == "hold":
-      if limited_accel >= LOW_SPEED_LAUNCH_REQUEST_ACCEL:
+      # The production planner request has already passed its own trajectory
+      # and jerk limits. Confirm that direct request while HOLD remains fully
+      # applied; waiting for this mapper's second slew limiter caused the
+      # measured route-68 resume lag.
+      if requested_accel >= LOW_SPEED_LAUNCH_REQUEST_ACCEL:
         self.launch_confirm_cycles += 1
       else:
         self.launch_confirm_cycles = 0
       if self.launch_confirm_cycles >= LOW_SPEED_LAUNCH_CONFIRM_CYCLES:
         self.low_speed_state = "release"
+        # HOLD forced the mapper's prior acceleration state negative even
+        # though its physical brake command is managed separately below.
+        # Begin the confirmed release from neutral so that this duplicate
+        # state does not add another half-second before the planner's already
+        # jerk-limited positive request can produce launch torque.
+        limited_accel = max(limited_accel, 0.0)
+        self.accel_last = limited_accel
     elif eligible and self.low_speed_state in ("release", "go", "creep"):
-      if limited_accel <= LOW_SPEED_LAUNCH_RESET_ACCEL:
+      if requested_accel <= LOW_SPEED_LAUNCH_RESET_ACCEL:
         self.low_speed_state = "hold"
         self.launch_confirm_cycles = 0
         self.release_transport_confirmed = False
         self.go_pulse_remaining = 0
         self.creep_wait_remaining = 0
     elif eligible and self.low_speed_state == "blocked":
-      if limited_accel <= LOW_SPEED_LAUNCH_RESET_ACCEL:
+      if requested_accel <= LOW_SPEED_LAUNCH_RESET_ACCEL:
         self.low_speed_state = "hold"
         self.launch_confirm_cycles = 0
         self.release_transport_confirmed = False
@@ -795,8 +818,17 @@ class JeepLongitudinalShadow:
           LOW_SPEED_LAUNCH_GRADE_MAX_NM,
         )
         grade_torque_nm = launch_grade_torque_nm
+        launch_base_engine_torque_nm = clip(
+          ENGINE_TORQUE_INTERCEPT_NM
+          + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
+          + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * max(limited_accel, 0.0)
+          + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps
+          + launch_grade_torque_nm,
+          0.0,
+          LOW_SPEED_LAUNCH_TORQUE_MAX_NM,
+        )
         desired_engine_torque_nm = clip(
-          desired_engine_torque_nm + launch_grade_torque_nm,
+          launch_base_engine_torque_nm * torque_blend,
           0.0,
           LOW_SPEED_LAUNCH_TORQUE_MAX_NM,
         )
@@ -839,10 +871,15 @@ class JeepLongitudinalShadow:
           BRAKE_APPLY_RATE_MPS3,
         )
     else:
+      brake_release_rate_mps3 = (
+        LOW_SPEED_HOLD_RELEASE_RATE_MPS3
+        if self.low_speed_state == "release"
+        else BRAKE_RELEASE_RATE_MPS3
+      )
       brake_accel_mps2 = move_toward(
         self.brake_accel_last_mps2,
         0.0,
-        BRAKE_RELEASE_RATE_MPS3,
+        brake_release_rate_mps3,
         BRAKE_APPLY_RATE_MPS3,
       )
       if brake_accel_mps2 >= -BRAKE_ZERO_EPSILON_MPS2:

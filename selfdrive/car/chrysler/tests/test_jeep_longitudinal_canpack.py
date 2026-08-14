@@ -50,13 +50,13 @@ class TestJeepLongitudinalCanPacking(unittest.TestCase):
     self.assertEqual(tuple(msg[2][6] >> 4 for msg in (brake, dash, torque)), (9, 9, 9))
     self.assertTrue(all(msg[2][7] == fca_checksum(msg[2]) for msg in (brake, dash, torque)))
 
-  def test_private_engine_torque_uses_das3_scaling_at_b7s_ceiling(self):
+  def test_private_engine_torque_uses_das3_scaling_at_b7t_ceiling(self):
     _, _, dat, _ = self.packer.make_can_msg(
       "WP_ACC_TORQUE_CMD", 0,
-      {"ENGINE_TORQUE_REQUEST_MAX": 1, "ENGINE_TORQUE_REQUEST": 500},
+      {"ENGINE_TORQUE_REQUEST_MAX": 1, "ENGINE_TORQUE_REQUEST": 460},
     )
     raw = ((dat[4] & 0x7F) << 8) | dat[5]
-    self.assertEqual(raw, 4000)
+    self.assertEqual(raw, 3840)
     self.assertEqual(dat[4] >> 7, 1)
 
   def test_command_diagnostic_preserves_factory_and_output_das3_fields(self):
