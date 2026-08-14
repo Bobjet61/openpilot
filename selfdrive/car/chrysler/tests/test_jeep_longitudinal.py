@@ -37,7 +37,9 @@ decode_wp_long_diagnostic = LONG.decode_wp_long_diagnostic
 decode_wp_long_command_diagnostic = LONG.decode_wp_long_command_diagnostic
 decode_wp_long_owner_diagnostic = LONG.decode_wp_long_owner_diagnostic
 jeep_acc_faulted = LONG.jeep_acc_faulted
+jeep_cruise_standstill = LONG.jeep_cruise_standstill
 jeep_factory_sng_lead_moving = LONG.jeep_factory_sng_lead_moving
+jeep_factory_sng_hold_motion_safe = LONG.jeep_factory_sng_hold_motion_safe
 jeep_factory_sng_vision_lead_moving = LONG.jeep_factory_sng_vision_lead_moving
 jeep_long_actuation_enabled = LONG.jeep_long_actuation_enabled
 jeep_long_mode_safety_param = LONG.jeep_long_mode_safety_param
@@ -123,6 +125,12 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertTrue(jeep_acc_faulted(1, 0))
     self.assertTrue(jeep_acc_faulted(0, 1))
     self.assertTrue(jeep_acc_faulted(2, 1))
+
+  def test_b7r_ignores_isolated_factory_standstill_only_for_op_long(self):
+    self.assertTrue(jeep_cruise_standstill(True, False))
+    self.assertFalse(jeep_cruise_standstill(False, False))
+    self.assertFalse(jeep_cruise_standstill(True, True))
+    self.assertFalse(jeep_cruise_standstill(False, True))
 
   def test_white_panda_diagnostic_decodes_applied_brake_cycle(self):
     diagnostic = decode_wp_long_diagnostic(0xB7, 0, 0, 0xA4)
@@ -391,7 +399,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertIn("ret.longitudinalTuning.deadzoneV = [0.1]", interface_source)
     self.assertIn("ret.longitudinalTuning.kpV = [0.6]", interface_source)
-    self.assertIn("ret.longitudinalTuning.kiV = [0.2]", interface_source)
+    self.assertIn("ret.longitudinalTuning.kiV = [0.1]", interface_source)
     self.assertIn(
       "ret.longitudinalActuatorDelayLowerBound = 0.15",
       interface_source,
@@ -444,6 +452,10 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertIn("B6Y_VISION_LEAD_CONFIRM_CYCLES = 5", carcontroller_source)
     self.assertIn("jeep_factory_sng_vision_lead_moving(", carcontroller_source)
     self.assertIn("self.b6y_approach_armed = True", carcontroller_source)
+    self.assertIn(
+      "not jeep_factory_sng_hold_motion_safe(CS.out.vEgo)",
+      carcontroller_source,
+    )
     self.assertIn("JEEP_LKAS_ENABLE_CONFIRM_FRAMES = 50", carcontroller_source)
     self.assertIn("self.jeep_lkas_enable_request_frame = -1", carcontroller_source)
     self.assertIn("elif self.lkas_control_bit_prev:", carcontroller_source)
@@ -454,6 +466,14 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     )
     self.assertIn('"ACC_STOP": envelope.stop_request', chryslercan_source)
     self.assertIn('"ACC_GO": envelope.go_request', chryslercan_source)
+
+  def test_factory_hold_tolerates_only_the_recorded_near_zero_creep(self):
+    self.assertTrue(jeep_factory_sng_hold_motion_safe(0.0))
+    self.assertTrue(jeep_factory_sng_hold_motion_safe(0.0062))
+    self.assertTrue(jeep_factory_sng_hold_motion_safe(-0.01))
+    self.assertFalse(jeep_factory_sng_hold_motion_safe(0.15))
+    self.assertFalse(jeep_factory_sng_hold_motion_safe(-0.15))
+    self.assertFalse(jeep_factory_sng_hold_motion_safe(float("nan")))
 
   def test_b6y_hold_message_has_no_propulsion_or_go_request(self):
     chryslercan = load_chryslercan()
@@ -545,9 +565,34 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual(negative.requested_accel, ACCEL_MIN)
 
   def test_jerk_limits(self):
+    self.assertAlmostEqual(
+      JeepLongitudinalShadow().update(1.0, eligible=True).limited_accel, 0.04,
+    )
+    self.assertAlmostEqual(
+      JeepLongitudinalShadow().update(-3.0, eligible=True).limited_accel, -0.04,
+    )
+
+  def test_b7s_uses_full_planner_accel_without_broadening_torque(self):
     shadow = JeepLongitudinalShadow()
-    self.assertAlmostEqual(shadow.update(1.0, eligible=True).limited_accel, 0.02)
-    self.assertAlmostEqual(shadow.update(-3.0, eligible=True).limited_accel, -0.02)
+    previous_torque = 0.0
+    for _ in range(100):
+      result = shadow.update(2.0, eligible=True, speed_mps=20.0)
+      self.assertLessEqual(
+        result.engine_torque_nm - previous_torque,
+        LONG.ENGINE_TORQUE_RATE_UP_NM_PER_S * LONG.COMMAND_DT + 1e-9,
+      )
+      self.assertLessEqual(result.engine_torque_nm, 500.0)
+      previous_torque = result.engine_torque_nm
+    self.assertEqual(result.requested_accel, 2.0)
+    self.assertEqual(result.limited_accel, 2.0)
+    self.assertGreater(result.engine_torque_nm, 440.0)
+    self.assertEqual(result.engine_torque_nm, 450.0)
+
+    for _ in range(160):
+      result = shadow.update(
+        2.0, eligible=True, speed_mps=20.0, pitch_rad=math.radians(4.0),
+      )
+    self.assertEqual(result.engine_torque_nm, 500.0)
 
   def test_ineligible_fails_to_zero(self):
     shadow = JeepLongitudinalShadow()
@@ -860,7 +905,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       LONG.ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD,
     )
 
-  def test_b6z_retains_the_fault_free_b6w_running_ceiling(self):
+  def test_b7s_uses_the_guarded_500_nm_running_ceiling(self):
     shadow = JeepLongitudinalShadow()
     for _ in range(160):
       result = shadow.update(
@@ -871,16 +916,17 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
       )
     self.assertEqual(result.limited_accel, ACCEL_MAX)
     self.assertTrue(result.engine_active)
-    self.assertEqual(result.engine_torque_nm, 440.0)
+    self.assertEqual(result.engine_torque_nm, 500.0)
 
-  def test_b6z_running_torque_ceiling_is_speed_shaped(self):
+  def test_b7s_running_torque_ceiling_remains_speed_shaped(self):
     self.assertEqual(engine_torque_max_for_speed(0.0), 250.0)
     self.assertEqual(engine_torque_max_for_speed(1.0), 270.0)
     self.assertEqual(engine_torque_max_for_speed(7.5), 400.0)
     self.assertEqual(engine_torque_max_for_speed(9.5), 440.0)
-    self.assertEqual(engine_torque_max_for_speed(16.22), 440.0)
+    self.assertEqual(engine_torque_max_for_speed(12.5), 500.0)
+    self.assertEqual(engine_torque_max_for_speed(16.22), 500.0)
 
-  def test_b6z_fault_window_torque_rise_is_bounded(self):
+  def test_b7s_torque_rise_remains_bounded_at_the_new_ceiling(self):
     shadow = JeepLongitudinalShadow()
     previous_torque = 0.0
     for _ in range(200):
@@ -894,9 +940,9 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
         result.engine_torque_nm - previous_torque,
         LONG.ENGINE_TORQUE_RATE_UP_NM_PER_S * LONG.COMMAND_DT + 1e-9,
       )
-      self.assertLessEqual(result.engine_torque_nm, 440.0)
+      self.assertLessEqual(result.engine_torque_nm, 500.0)
       previous_torque = result.engine_torque_nm
-    self.assertEqual(result.engine_torque_nm, 440.0)
+    self.assertEqual(result.engine_torque_nm, 500.0)
 
   def test_low_speed_torque_is_bounded_after_confirmed_creep(self):
     shadow = JeepLongitudinalShadow()

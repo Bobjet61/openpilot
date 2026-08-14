@@ -14,10 +14,12 @@ from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   JEEP_LONG_ACTUATION_COMPILED,
   JeepLongitudinalShadow,
   JeepLongitudinalTransportScheduler,
+  jeep_factory_sng_hold_motion_safe,
   jeep_factory_sng_lead_moving,
   jeep_factory_sng_vision_lead_moving,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
+from openpilot.selfdrive.car.chrysler.jeep_steering_discontinuity_guard import JeepSteeringDiscontinuityGuard
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
 from openpilot.selfdrive.car.interfaces import CarControllerBase, FORWARD_GEARS
@@ -81,6 +83,14 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_selection = None
     self.jeep_radar_shadow_vision = None
     self.jeep_radar_shadow_reason_counts = Counter()
+    self.jeep_steering_model_sm = (
+      messaging.SubMaster(["modelV2"])
+      if CP.carFingerprint in JEEP_LONG_CARS else None
+    )
+    self.jeep_steering_discontinuity_guard = (
+      JeepSteeringDiscontinuityGuard()
+      if CP.carFingerprint in JEEP_LONG_CARS else None
+    )
 
     self.packer = CANPacker(dbc_name)
     self.params = CarControllerParams(CP)
@@ -357,19 +367,63 @@ class CarController(CarControllerBase):
       if not lkas_control_bit and self.lkas_control_bit_prev:
         self.last_lkas_falling_edge = self.frame
 
-      # steer torque
+      # Steer torque. Response 5 remains the ordinary Jeep limiter. Only the
+      # first low-confidence reversal of an already-established path enters a
+      # separately bounded one-second discontinuity guard.
       previous_apply_steer = self.apply_steer_last
-      new_steer = int(round(CC.actuators.steer * self.params.STEER_MAX))
+      control_allowed = (
+        lkas_active
+        and lkas_control_bit
+        and self.lkas_control_bit_prev
+      )
+      requested_steer = int(round(
+        CC.actuators.steer * self.params.STEER_MAX,
+      ))
+      new_steer = requested_steer
+      if (
+          self.jeep_steering_discontinuity_guard is not None
+          and self.jeep_steering_model_sm is not None
+      ):
+        self.jeep_steering_model_sm.update(0)
+        model_valid = (
+          self.jeep_steering_model_sm.seen["modelV2"]
+          and self.jeep_steering_model_sm.valid["modelV2"]
+          and self.jeep_steering_model_sm.alive["modelV2"]
+        )
+        left_lane_probability = 1.0
+        right_lane_probability = 1.0
+        if model_valid:
+          lane_probabilities = list(
+            self.jeep_steering_model_sm["modelV2"].laneLineProbs,
+          )
+          model_valid = len(lane_probabilities) >= 3
+          if model_valid:
+            left_lane_probability = lane_probabilities[1]
+            right_lane_probability = lane_probabilities[2]
+        guard_result = self.jeep_steering_discontinuity_guard.update(
+          requested_raw=requested_steer,
+          previous_applied_raw=previous_apply_steer,
+          desired_curvature=CC.actuators.curvature,
+          left_lane_probability=left_lane_probability,
+          right_lane_probability=right_lane_probability,
+          speed_mps=CS.out.vEgo,
+          control_allowed=control_allowed,
+          steering_pressed=CS.out.steeringPressed,
+          model_valid=model_valid,
+        )
+        new_steer = guard_result.requested_raw
+        if guard_result.activated:
+          cloudlog.warning(
+            "Jeep steering discontinuity guard: "
+            f"requested={requested_steer},guarded={new_steer},"
+            f"curvature={CC.actuators.curvature:.6f},"
+            f"lane_confidence={guard_result.lane_confidence:.3f}"
+          )
       limited_steer = apply_meas_steer_torque_limits(
         new_steer,
         previous_apply_steer,
         CS.out.steeringTorqueEps,
         self.params,
-      )
-      control_allowed = (
-        lkas_active
-        and lkas_control_bit
-        and self.lkas_control_bit_prev
       )
       apply_steer = limited_steer
       if not control_allowed:
@@ -450,7 +504,8 @@ class CarController(CarControllerBase):
     if (CS.b6y_hold_active and
         (CC.cruiseControl.cancel or
          CS.out.gasPressed or CS.out.brakePressed or
-         not CS.forward_gear or not CS.out.standstill or
+         not CS.forward_gear or
+         not jeep_factory_sng_hold_motion_safe(CS.out.vEgo) or
          not CS.out.cruiseState.available or
          CS.out.accFaulted or CS.out.stockAeb)):
       CS.b6y_hold_active = False

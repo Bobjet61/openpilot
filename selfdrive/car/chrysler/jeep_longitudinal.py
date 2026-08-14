@@ -40,6 +40,19 @@ FACTORY_SNG_VISION_MIN_PROB = 0.90
 FACTORY_SNG_VISION_MAX_DISTANCE_M = 25.0
 FACTORY_SNG_VISION_MIN_VREL_MPS = 0.6
 FACTORY_SNG_VISION_MIN_DISTANCE_GAIN_M = 0.5
+# Route 62 showed the stock standstill bit dropping on only 0.006 m/s of
+# measured creep, which released the exact braking-only hold before RESUME
+# confirmation. Keep the hold through less than 0.15 m/s; both Pandas retain
+# independent pedal, fault, collision, freshness, and command-envelope guards.
+FACTORY_SNG_HOLD_CREEP_MAX_MPS = 0.15
+
+
+def jeep_factory_sng_hold_motion_safe(v_ego):
+  """Permit only near-zero creep while the exact braking-only hold is active."""
+  return (
+    math.isfinite(float(v_ego))
+    and abs(float(v_ego)) < FACTORY_SNG_HOLD_CREEP_MAX_MPS
+  )
 
 
 def jeep_factory_sng_lead_moving(
@@ -85,6 +98,18 @@ def jeep_factory_sng_vision_lead_moving(
 def jeep_acc_faulted(das_3_fault, das_4_fault):
   """Combine both FCA ACC fault sources used by the EcoDiesel."""
   return das_3_fault != 0 or das_4_fault != 0
+
+
+def jeep_cruise_standstill(factory_acc_standstill, openpilot_longitudinal):
+  """Expose the factory standstill latch only while factory ACC owns long.
+
+  With the ACC module isolated behind CAN2, its DAS_3 standstill bit remains
+  asserted while openpilot is deliberately holding the vehicle. Feeding that
+  obsolete owner state back into LongControl prevents the normal planned
+  STOPPING -> PID launch transition. Physical standstill is still reported
+  independently from wheel speed in CarState.standstill.
+  """
+  return bool(factory_acc_standstill) and not bool(openpilot_longitudinal)
 
 
 # b6u single-owner stop/go actuation build. Runtime output still requires the host,
@@ -212,18 +237,19 @@ def jeep_long_mode_safety_param(
 # Stock-log calibration on this EcoDiesel found a DAS_3 braking p01 of
 # -3.001015 m/s^2. Keep the shadow envelope just inside that value.
 ACCEL_MIN = -3.0
-# b6r's 5.38% uphill interval stayed at the old 1.25 m/s^2 mapper ceiling
-# while losing 8.24 km/h. A separate stock-ACC uphill capture reached
-# 503.25 Nm median and 535.5 Nm maximum. The active b6x route asserted the
-# dashboard ACC fault after its output reached 440 Nm, but the fault-free b6w
-# route had both p95 and p99 at the same 440 Nm ceiling. Preserve that proven
-# ceiling while reverting the b6x gain/rise regression below.
-ACCEL_MAX = 1.5
+# Route 60 showed the production controller repeatedly asking for 2.0 m/s^2
+# while this mapper clipped the request to 1.5 m/s^2 and the Jeep lost speed
+# under sustained load. Accept the controller's complete positive range.
+ACCEL_MAX = 2.0
 # Telemetry-only planner classification threshold. b6o actuator mode selection
 # uses the blended hysteresis thresholds below, not this legacy deadband.
 ACCEL_DEADBAND = 0.05
 COMMAND_DT = 0.02
-JERK_UP = 1.0
+# The production planner already jerk-limits acceleration. A second 1.0 m/s^3
+# host ramp delayed full propulsion by another two seconds. Let the request
+# reach the mapper at 2.0 m/s^3; actual propulsion still cannot rise faster
+# than the unchanged 300 Nm/s host and Panda torque envelope.
+JERK_UP = 2.0
 JERK_DOWN = 2.0
 # This changes only the internal request while the fixed standstill brake hold
 # remains applied. It lets a confirmed launch reach the separate release state
@@ -293,10 +319,12 @@ ENGINE_TORQUE_GRADE_PITCH_LIMIT_RAD = math.radians(4.0)
 ENGINE_TORQUE_GRADE_FILTER_TAU_S = 1.5
 ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM = 250.0
 ENGINE_TORQUE_LOW_SPEED_MAX_GAIN_NM_PER_MPS = 20.0
-# b6w sustained the 440 Nm ceiling without a dashboard fault. Keep that proven
-# authority and separately mirror the speed-shaped low-speed envelope in both
-# Pandas so a corrupt host cannot jump directly to this ceiling at low speed.
-ENGINE_TORQUE_MAX_NM = 440.0
+# The synchronized b6s road capture used up to 460.75 Nm for 328.82 seconds of
+# active ownership without a torque-envelope or dashboard fault. Separate
+# factory captures reached 503.25 Nm median and 535.5 Nm maximum uphill. Use a
+# bounded 500 Nm next step, mirrored by both Pandas, while retaining the
+# existing speed-shaped low-speed ceiling and 300 Nm/s rise limit.
+ENGINE_TORQUE_MAX_NM = 500.0
 
 # b6r cut normalized switching 48.8%, but its route still cycled at planner
 # requests near -0.14 to -0.19 m/s^2. Offline same-input screening showed that
@@ -314,7 +342,7 @@ BRAKE_EXIT_ACCEL = -0.08
 BRAKE_BLEND_FULL_ACCEL = -0.80
 ENGINE_TORQUE_RATE_UP_NM_PER_S = 300.0
 ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
-# A confirmed brake request must retire even the 440 Nm ceiling before the
+# A confirmed brake request must retire even the 500 Nm ceiling before the
 # coast interlock can admit braking. The faster brake-transition release is
 # only a withdrawal of requested engine torque; propulsion increases retain
 # the last fault-free 300 Nm/s rate and normal coasting retains 600 Nm/s.

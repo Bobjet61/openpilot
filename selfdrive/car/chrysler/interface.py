@@ -103,19 +103,18 @@ class CarInterface(CarInterfaceBase):
 
       if jeep_op_long:
         # Chrysler has no upstream openpilot-long tune, so the generic
-        # Kp=Ki=1, zero-deadband defaults were driving the delayed diesel
-        # torque/brake mapper into a cruise-speed limit cycle. Identical-input
-        # replay of the two b6w drives selected this moderate feedback-only
-        # change: total output variation fell about 25%, steady-cruise
-        # variation fell about 36%, and full output remained available for
-        # every recorded large speed deficit. Planner feed-forward stays 1.0.
+        # Kp=Ki=1, zero-deadband defaults drove the delayed diesel mapper into
+        # a cruise-speed limit cycle. Retain the responsive proportional term
+        # but halve the integral term: recorded-trajectory replay reduced
+        # near-target braking while preserving full output for every recorded
+        # large speed deficit. Planner feed-forward stays 1.0.
         ret.longitudinalTuning.deadzoneBP = [0.0]
         ret.longitudinalTuning.deadzoneV = [0.1]
         ret.longitudinalTuning.kf = 1.0
         ret.longitudinalTuning.kpBP = [0.0]
         ret.longitudinalTuning.kpV = [0.6]
         ret.longitudinalTuning.kiBP = [0.0]
-        ret.longitudinalTuning.kiV = [0.2]
+        ret.longitudinalTuning.kiV = [0.1]
         # Existing qlogs are too sparse for causal lag identification. Keep
         # the upstream 0.15 s assumption instead of inventing a new delay.
         ret.longitudinalActuatorDelayLowerBound = 0.15
