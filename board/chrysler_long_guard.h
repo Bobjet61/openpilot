@@ -41,12 +41,17 @@
 #define CHRYSLER_LONG_DECEL_BRAKE_MAX_RAW 3275  // approximately 0 m/s^2
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094   // stock no-brake sentinel
 
-// b6v asserted the DAS_4 dashboard fault while a 500 Nm request was saturated,
-// while an earlier 439.25 Nm peak remained fault-free. The private DAS_3
-// scaling is raw * 0.25 - 500 Nm, so raw 3760 independently enforces b6w's
-// common 440 Nm ceiling.
+// The synchronized b6s road capture used 460.75 Nm without a torque-envelope
+// or dashboard fault, while independent stock captures exceeded 500 Nm uphill.
+// Permit the bounded 500 Nm b7s step without changing the torque rise limit.
+// The running limit below mirrors the host's 250 + 20 * speed_mps envelope
+// using SPEED_1's 0.071028 m/s raw scale; 142/25 is a conservative integer
+// approximation of 4 raw/Nm * 20 Nm/(m/s) * 0.071028 m/s/raw.
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 3760
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
+#define CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW 3000
+#define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_NUM 142
+#define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_DEN 25
 
 // SPEED_1 raw * 0.071028 m/s. Running torque uses the independently measured
 // raw-11 threshold. The complete capture also showed a bounded engine request
@@ -96,6 +101,91 @@
 #define CHRYSLER_LONG_LOW_GO 3U
 #define CHRYSLER_LONG_LOW_CREEP 4U
 #define CHRYSLER_LONG_LOW_GO_MAX_CYCLES 4U
+
+// Factory + Stop/Go uses the host's exact braking-only DAS_3 bridge and an
+// exact RESUME button. CAN2 isolation makes the White Panda the sole arbiter
+// into the ACC module, so suppress only the SCCM no-button duplicate carrying
+// the same counter immediately after a guarded RESUME.
+#define CHRYSLER_FACTORY_SNG_HOLD_TIMEOUT_US 100000U
+#define CHRYSLER_FACTORY_SNG_RELEASE_SUPPRESS_US 15000U
+#define CHRYSLER_FACTORY_SNG_SPEED_MAX_RAW 2
+#define CHRYSLER_FACTORY_SNG_HOLD_DECEL_RAW 2866
+#define CHRYSLER_FACTORY_SNG_BUTTON_NONE 0x00U
+#define CHRYSLER_FACTORY_SNG_BUTTON_RESUME 0x10U
+
+static inline bool chrysler_factory_sng_hold_payload_valid(
+    const int len,
+    const bool checksum_valid,
+    const uint8_t byte0,
+    const uint8_t byte2,
+    const uint8_t byte3,
+    const uint8_t byte4,
+    const uint8_t byte5,
+    const uint8_t byte6) {
+  const bool torque_disabled = (byte0 & 0x80U) == 0U;
+  const bool stop_and_go_clear = (byte0 & 0x60U) == 0U;
+  const int decel_raw = ((byte2 & 0x0FU) << 8) | byte3;
+  const bool acc_available = (byte2 & 0x10U) != 0U;
+  const bool acc_active = (byte2 & 0x20U) != 0U;
+  const int command_type = (byte4 >> 4) & 0x7U;
+  const int fault = (byte5 >> 6) & 0x3U;
+  const bool collision = (byte6 & 0x1U) != 0U || command_type > 1;
+  const bool brake_prep = (byte6 & 0x2U) != 0U;
+  return len == 8 && checksum_valid && torque_disabled &&
+         stop_and_go_clear &&
+         decel_raw == CHRYSLER_FACTORY_SNG_HOLD_DECEL_RAW &&
+         acc_available && acc_active && command_type == 1 &&
+         fault == 0 && !collision && !brake_prep;
+}
+
+static inline bool chrysler_factory_sng_resume_context_valid(
+    const uint32_t now,
+    const uint32_t last_hold_ts,
+    const bool hold_valid,
+    const bool speed_fresh,
+    const int speed_raw,
+    const bool gas_fresh,
+    const bool gas_pressed,
+    const bool brake_fresh,
+    const bool brake_pressed,
+    const bool stock_fresh,
+    const bool stock_valid,
+    const bool stock_available,
+    const int stock_fault,
+    const bool stock_collision,
+    const bool dashboard_ready) {
+  return hold_valid &&
+         (uint32_t)(now - last_hold_ts) <=
+           CHRYSLER_FACTORY_SNG_HOLD_TIMEOUT_US &&
+         speed_fresh && speed_raw <= CHRYSLER_FACTORY_SNG_SPEED_MAX_RAW &&
+         gas_fresh && !gas_pressed && brake_fresh && !brake_pressed &&
+         stock_fresh && stock_valid && stock_available && stock_fault == 0 &&
+         !stock_collision && dashboard_ready;
+}
+
+static inline bool chrysler_factory_sng_suppress_matching_release(
+    const uint8_t buttons,
+    const int counter,
+    const uint32_t now,
+    const bool resume_latched,
+    const int resume_counter,
+    const uint32_t resume_ts,
+    const bool context_valid) {
+  return context_valid && resume_latched &&
+         buttons == CHRYSLER_FACTORY_SNG_BUTTON_NONE &&
+         counter == resume_counter &&
+         (uint32_t)(now - resume_ts) <=
+           CHRYSLER_FACTORY_SNG_RELEASE_SUPPRESS_US;
+}
+
+static inline int chrysler_long_running_torque_max_raw(const int speed_raw) {
+  const int speed_limited_raw =
+    CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW +
+    (speed_raw * CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_NUM) /
+      CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_DEN;
+  return speed_limited_raw < CHRYSLER_LONG_TORQUE_MAX_RAW ?
+    speed_limited_raw : CHRYSLER_LONG_TORQUE_MAX_RAW;
+}
 
 static inline uint32_t chrysler_long_status_diagnostic_word(
     const uint8_t status,
@@ -386,7 +476,7 @@ static inline bool chrysler_long_commands_valid(
       valid = valid && (torque_raw >= CHRYSLER_LONG_TORQUE_ZERO_RAW);
       const bool running_torque_valid =
         (speed_raw >= CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
-        (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+        (torque_raw <= chrysler_long_running_torque_max_raw(speed_raw));
       const bool launch_torque_valid =
         (speed_raw < CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
         (low_speed_state == CHRYSLER_LONG_LOW_CREEP) &&

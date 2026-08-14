@@ -485,8 +485,9 @@ void can_rx(uint8_t can_number) {
           can_send(&to_send_mod, 2, true);
         }
         if (addr == 571) { //wheel buttons
-          send_wheel_button_msg(&to_send_mod);
-          can_send(&to_send_mod, 1, true);
+          if (send_wheel_button_msg(&to_send_mod)) {
+            can_send(&to_send_mod, 1, true);
+          }
         }
      }
 

@@ -68,6 +68,11 @@ static uint8_t chrysler_long_diag_counters = 0U;
 static uint16_t chrysler_long_diag_stock_engine_word = 0U;
 static uint16_t chrysler_long_diag_output_engine_word = 0U;
 static uint16_t chrysler_long_diag_stock_accel_word = 0U;
+static bool chrysler_factory_sng_hold_valid = false;
+static bool chrysler_factory_sng_resume_latched = false;
+static uint32_t chrysler_factory_sng_last_hold_ts = 0U;
+static uint32_t chrysler_factory_sng_resume_ts = 0U;
+static int chrysler_factory_sng_resume_counter = 0;
 
 static void chrysler_steering_update_guard(void) {
   steer_type = chrysler_steer_mode_from_stock_das3(
@@ -513,9 +518,68 @@ static void send_acc_accel_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   to_fwd->RDHR |= 0x00000000U;
 }
 
-static void send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
+static bool send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   chrysler_long_update_guard();
   const uint8_t original_buttons = GET_BYTE(to_fwd, 0);
+  const int button_counter = (GET_BYTE(to_fwd, 1) >> 4) & 0xF;
+  const uint32_t now = TIM2->CNT;
+  const bool button_checksum_valid =
+    (GET_LEN(to_fwd) == 3) &&
+    (GET_BYTE(to_fwd, 2) == fca_compute_checksum(to_fwd));
+  const bool factory_resume_context =
+    !is_oplong_enabled && button_checksum_valid &&
+    chrysler_factory_sng_resume_context_valid(
+      now,
+      chrysler_factory_sng_last_hold_ts,
+      chrysler_factory_sng_hold_valid,
+      chrysler_long_is_fresh(
+        now, chrysler_long_last_speed_ts, chrysler_long_speed_valid,
+        CHRYSLER_LONG_SPEED_TIMEOUT_US),
+      chrysler_long_vehicle_speed_raw,
+      chrysler_long_is_fresh(
+        now, chrysler_long_last_gas_pedal_ts,
+        chrysler_long_gas_pedal_valid,
+        CHRYSLER_LONG_GAS_PEDAL_TIMEOUT_US),
+      chrysler_long_driver_gas,
+      chrysler_long_is_fresh(
+        now, chrysler_long_last_brake_pedal_ts,
+        chrysler_long_brake_pedal_valid,
+        CHRYSLER_LONG_BRAKE_PEDAL_TIMEOUT_US),
+      chrysler_long_driver_brake,
+      chrysler_long_is_fresh(
+        now, chrysler_long_last_stock_acc_ts,
+        chrysler_long_stock_acc_valid,
+        CHRYSLER_LONG_STOCK_ACC_TIMEOUT_US),
+      chrysler_long_stock_acc_valid,
+      org_acc_available,
+      chrysler_long_stock_acc_fault,
+      org_collision_active,
+      chrysler_long_dashboard_ready(
+        now, chrysler_long_last_dashboard_ts,
+        chrysler_long_dashboard_valid, chrysler_long_dashboard_fault));
+
+  if (chrysler_factory_sng_suppress_matching_release(
+      original_buttons, button_counter, now,
+      chrysler_factory_sng_resume_latched,
+      chrysler_factory_sng_resume_counter,
+      chrysler_factory_sng_resume_ts,
+      factory_resume_context)) {
+    chrysler_factory_sng_resume_latched = false;
+    return false;
+  }
+
+  if (factory_resume_context &&
+      original_buttons == CHRYSLER_FACTORY_SNG_BUTTON_RESUME) {
+    chrysler_factory_sng_resume_latched = true;
+    chrysler_factory_sng_resume_counter = button_counter;
+    chrysler_factory_sng_resume_ts = now;
+  } else if (original_buttons != CHRYSLER_FACTORY_SNG_BUTTON_NONE ||
+             !factory_resume_context ||
+             (chrysler_factory_sng_resume_latched &&
+              button_counter != chrysler_factory_sng_resume_counter)) {
+    chrysler_factory_sng_resume_latched = false;
+  }
+
   // Physical or host-generated Cancel and ACC main presses revoke ownership
   // before the next DAS_3 frame can be modified.
   if ((original_buttons & 0x01U) || (original_buttons & 0xC0U)) {
@@ -534,6 +598,7 @@ static void send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   to_fwd->RDLR &= 0x0000FFFFU;
   const uint8_t crc = fca_compute_checksum(to_fwd);
   to_fwd->RDLR |= (uint32_t)crc << 16;
+  return true;
 }
 
 static void create_chrysler_wp_status_diagnostic(
@@ -592,6 +657,23 @@ int default_rx_hook(CAN_FIFOMailBox_TypeDef *to_push) {
     chrysler_long_last_speed_ts = TIM2->CNT;
     chrysler_long_speed_valid = true;
     chrysler_long_update_guard();
+  }
+
+  if ((addr == 500) && (bus_num == 0)) {
+    const bool checksum_valid =
+      (GET_LEN(to_push) == 8) &&
+      (GET_BYTE(to_push, 7) == fca_compute_checksum(to_push));
+    chrysler_factory_sng_hold_valid =
+      chrysler_factory_sng_hold_payload_valid(
+        GET_LEN(to_push), checksum_valid,
+        GET_BYTE(to_push, 0), GET_BYTE(to_push, 2),
+        GET_BYTE(to_push, 3), GET_BYTE(to_push, 4),
+        GET_BYTE(to_push, 5), GET_BYTE(to_push, 6));
+    if (chrysler_factory_sng_hold_valid) {
+      chrysler_factory_sng_last_hold_ts = TIM2->CNT;
+    } else {
+      chrysler_factory_sng_resume_latched = false;
+    }
   }
 
   if ((addr == 284) && (bus_num == 0)) {

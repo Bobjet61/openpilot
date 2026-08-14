@@ -21,6 +21,11 @@ int main(void) {
   assert(chrysler_long_dashboard_fault_from_byte6(0xFFU));
 
   assert(CHRYSLER_LONG_ACTUATION == 1U);
+  assert(chrysler_long_running_torque_max_raw(11) == 3062);
+  assert(chrysler_long_running_torque_max_raw(100) == 3568);
+  assert(chrysler_long_running_torque_max_raw(176) == 3999);
+  assert(chrysler_long_running_torque_max_raw(177) == 4000);
+  assert(chrysler_long_running_torque_max_raw(1000) == 4000);
 
   // Diagnostic packing preserves the two raw factory DAS_3 words and the
   // exact output engine word in their original byte order.
@@ -205,7 +210,17 @@ int main(void) {
   assert(chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
-    CHRYSLER_LONG_TORQUE_MAX_RAW, 100, false, false, false,
+    3568, 100, false, false, false,
+    CHRYSLER_LONG_LOW_DRIVE));
+  assert(!chrysler_long_commands_valid(
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
+    0, false, true,
+    3569, 100, false, false, false,
+    CHRYSLER_LONG_LOW_DRIVE));
+  assert(chrysler_long_commands_valid(
+    true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
+    0, false, true,
+    CHRYSLER_LONG_TORQUE_MAX_RAW, 177, false, false, false,
     CHRYSLER_LONG_LOW_DRIVE));
 
   // Standstill launch torque is authorized only after HOLD -> RELEASE -> GO.
@@ -237,7 +252,7 @@ int main(void) {
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, CHRYSLER_LONG_DECEL_INACTIVE_RAW,
     0, false, true,
-    CHRYSLER_LONG_TORQUE_MAX_RAW + 1, 100, false, false, false,
+    CHRYSLER_LONG_TORQUE_MAX_RAW + 1, 177, false, false, false,
     CHRYSLER_LONG_LOW_DRIVE));
   assert(!chrysler_long_commands_valid(
     true, true, true, false, false, 2866, 1, false, false,
@@ -374,6 +389,52 @@ int main(void) {
     true, true, false, false, false) ==
     (CHRYSLER_LONG_DIAG_DRIVER_BRAKE |
      CHRYSLER_LONG_DIAG_COMMAND_ENVELOPE));
+
+  // Route 64's exact host braking-only DAS_3 payload is the only frame that
+  // can arm factory stop/go button arbitration.
+  assert(chrysler_factory_sng_hold_payload_valid(
+    8, true, 0x08U, 0x3BU, 0x32U, 0x12U, 0x00U, 0x20U));
+  assert(!chrysler_factory_sng_hold_payload_valid(
+    8, false, 0x08U, 0x3BU, 0x32U, 0x12U, 0x00U, 0x20U));
+  assert(!chrysler_factory_sng_hold_payload_valid(
+    8, true, 0x08U, 0x3BU, 0x33U, 0x12U, 0x00U, 0x20U));
+  assert(!chrysler_factory_sng_hold_payload_valid(
+    8, true, 0x08U, 0x3BU, 0x32U, 0x22U, 0x00U, 0x20U));
+
+  assert(chrysler_factory_sng_resume_context_valid(
+    100000U, 50000U, true,
+    true, CHRYSLER_FACTORY_SNG_SPEED_MAX_RAW,
+    true, false, true, false,
+    true, true, true, 0, false, true));
+  assert(!chrysler_factory_sng_resume_context_valid(
+    200001U, 100000U, true,
+    true, 0, true, false, true, false,
+    true, true, true, 0, false, true));
+  assert(!chrysler_factory_sng_resume_context_valid(
+    100000U, 50000U, true,
+    true, CHRYSLER_FACTORY_SNG_SPEED_MAX_RAW + 1,
+    true, false, true, false,
+    true, true, true, 0, false, true));
+  assert(!chrysler_factory_sng_resume_context_valid(
+    100000U, 50000U, true,
+    true, 0, true, true, true, false,
+    true, true, true, 0, false, true));
+
+  assert(chrysler_factory_sng_suppress_matching_release(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 8, 14000U,
+    true, 8, 1000U, true));
+  assert(!chrysler_factory_sng_suppress_matching_release(
+    CHRYSLER_FACTORY_SNG_BUTTON_RESUME, 8, 14000U,
+    true, 8, 1000U, true));
+  assert(!chrysler_factory_sng_suppress_matching_release(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 9, 14000U,
+    true, 8, 1000U, true));
+  assert(!chrysler_factory_sng_suppress_matching_release(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 8, 16001U,
+    true, 8, 1000U, true));
+  assert(!chrysler_factory_sng_suppress_matching_release(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE, 8, 14000U,
+    true, 8, 1000U, false));
 
   return 0;
 }
