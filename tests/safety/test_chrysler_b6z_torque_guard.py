@@ -90,30 +90,30 @@ class TestChryslerB6zTorqueGuard(unittest.TestCase):
   def test_speed_shaped_low_running_ceiling(self):
     self.enable_sources(1.0)
     self.assertEqual(
-      self.transmit_engine_cycle(3075),
+      self.transmit_engine_cycle(3275),
       (True, True, True),
     )
 
     self.setUp()
     self.enable_sources(1.0)
     self.assertEqual(
-      self.transmit_engine_cycle(3085),
+      self.transmit_engine_cycle(3285),
       (True, True, False),
     )
 
-  def test_absolute_500_nm_ceiling(self):
+  def test_absolute_460_nm_ceiling(self):
     # Use a comfortably saturated point of the speed-shaped envelope. The
-    # production host reaches the 500 Nm cap at 12.5 m/s.
+    # production host reaches the 460 Nm cap at 8.0 m/s.
     self.enable_sources(16.0)
     self.assertEqual(
-      self.transmit_engine_cycle(4000),
+      self.transmit_engine_cycle(3840),
       (True, True, True),
     )
 
     self.setUp()
     self.enable_sources(16.0)
     self.assertEqual(
-      self.transmit_engine_cycle(4001),
+      self.transmit_engine_cycle(3841),
       (True, True, False),
     )
 

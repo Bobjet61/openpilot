@@ -56,18 +56,19 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_DECEL_MAX_RAW 3275
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-// The synchronized b6s road capture used 460.75 Nm without a torque-envelope
-// or dashboard fault, while independent stock captures exceeded 500 Nm uphill.
-// Permit the bounded 500 Nm b7s step without changing the torque rise limit.
-// The running limit below mirrors the host's 250 + 20 * speed_mps envelope
+// Route 68 asserted a DAS_4 ACC fault after 6.2 seconds at 500 Nm. Retain the
+// independently fault-free 460 Nm ceiling and raise only the moving low-speed
+// base. The running limit below mirrors the host's 300 + 20 * speed_mps envelope
 // using SPEED_1's 0.071028 m/s raw scale; 142/25 is a conservative integer
 // approximation of 4 raw/Nm * 20 Nm/(m/s) * 0.071028 m/s/raw.
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
-#define CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW 3000
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 3840
+#define CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW 3200
 #define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_NUM 142
 #define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_DEN 25
 #define CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW 11
-#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2800
+// 320 Nm. This is a ceiling after the complete HOLD -> RELEASE -> GO sequence,
+// not a launch floor; the host remains request-proportional and rate-limited.
+#define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 3280
 #define CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW 12
 #define CHRYSLER_LONG_LOW_GO_MAX_CYCLES 4U
 #define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U

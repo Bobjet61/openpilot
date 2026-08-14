@@ -770,11 +770,11 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       (True, True, True),
     )
 
-  def test_b7s_running_torque_ceiling_is_500_nm_and_speed_shaped(self):
+  def test_b7t_running_torque_ceiling_is_460_nm_and_speed_shaped(self):
     self._enable_safe_source()
     self.assertEqual(
       self._tx_private_cycle(
-        0, 0, torque_raw=3075, engine_request=True,
+        0, 0, torque_raw=3275, engine_request=True,
       ),
       (True, True, True),
     )
@@ -783,7 +783,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._enable_safe_source()
     self.assertEqual(
       self._tx_private_cycle(
-        0, 0, torque_raw=3085, engine_request=True,
+        0, 0, torque_raw=3285, engine_request=True,
       ),
       (True, True, False),
     )
@@ -793,7 +793,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._speed_msg(16.0)))
     self.assertEqual(
       self._tx_private_cycle(
-        0, 0, torque_raw=4000, engine_request=True,
+        0, 0, torque_raw=3840, engine_request=True,
       ),
       (True, True, True),
     )
@@ -803,7 +803,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._rx(self._speed_msg(16.0)))
     self.assertEqual(
       self._tx_private_cycle(
-        0, 0, torque_raw=4001, engine_request=True,
+        0, 0, torque_raw=3841, engine_request=True,
       ),
       (True, True, False),
     )
@@ -1159,7 +1159,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._refresh_safe_source(80_000, speed=0.0, counter=2)
     self.assertEqual(
       self._tx_private_cycle(
-        4, 80_000, torque_raw=2800,
+        4, 80_000, torque_raw=3280,
         engine_request=True, enable=True,
       ),
       (True, True, True),
@@ -1167,7 +1167,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._refresh_safe_source(100_000, speed=0.0, counter=3)
     self.assertEqual(
       self._tx_private_cycle(
-        5, 100_000, torque_raw=2801,
+        5, 100_000, torque_raw=3281,
         engine_request=True, enable=True,
       ),
       (True, True, False),
