@@ -56,11 +56,16 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_DECEL_MAX_RAW 3275
 #define CHRYSLER_LONG_DECEL_INACTIVE_RAW 4094
 #define CHRYSLER_LONG_TORQUE_ZERO_RAW 2000
-// b6v asserted the DAS_4 dashboard fault while a 500 Nm request was saturated,
-// while an earlier 439.25 Nm peak remained fault-free. The private DAS_3
-// scaling is raw * 0.25 - 500 Nm, so raw 3760 independently enforces b6w's
-// common 440 Nm ceiling.
-#define CHRYSLER_LONG_TORQUE_MAX_RAW 3760
+// The synchronized b6s road capture used 460.75 Nm without a torque-envelope
+// or dashboard fault, while independent stock captures exceeded 500 Nm uphill.
+// Permit the bounded 500 Nm b7s step without changing the torque rise limit.
+// The running limit below mirrors the host's 250 + 20 * speed_mps envelope
+// using SPEED_1's 0.071028 m/s raw scale; 142/25 is a conservative integer
+// approximation of 4 raw/Nm * 20 Nm/(m/s) * 0.071028 m/s/raw.
+#define CHRYSLER_LONG_TORQUE_MAX_RAW 4000
+#define CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW 3000
+#define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_NUM 142
+#define CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_DEN 25
 #define CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW 11
 #define CHRYSLER_LONG_LAUNCH_TORQUE_MAX_RAW 2800
 #define CHRYSLER_LONG_STOP_GO_SPEED_MAX_RAW 12
@@ -70,6 +75,19 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_COUNTER_RESET_US 100000U
 #define CHRYSLER_B6Y_HOLD_DECEL_RAW 2866
 #define CHRYSLER_B6Y_HOLD_TIMEOUT_US 100000U
+// SPEED_1 uses about 0.071 m/s per raw count. Keep the exact braking-only
+// hold through the route-62 near-zero creep, but clear above raw 2
+// (approximately 0.14 m/s / 0.32 mph).
+#define CHRYSLER_B6Y_HOLD_CREEP_MAX_RAW 2
+
+static int chrysler_long_running_torque_max_raw(const int speed_raw) {
+  const int speed_limited_raw =
+    CHRYSLER_LONG_TORQUE_LOW_SPEED_BASE_RAW +
+    (speed_raw * CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_NUM) /
+      CHRYSLER_LONG_TORQUE_SPEED_GAIN_RAW_DEN;
+  return speed_limited_raw < CHRYSLER_LONG_TORQUE_MAX_RAW ?
+    speed_limited_raw : CHRYSLER_LONG_TORQUE_MAX_RAW;
+}
 
 typedef struct {
   const int EPS_2;
@@ -208,6 +226,7 @@ const uint32_t CHRYSLER_PARAM_JEEP_RATE4 = 8U;
 const uint32_t CHRYSLER_PARAM_JEEP_LONG_DIAGNOSTIC = 16U;
 const uint32_t CHRYSLER_PARAM_JEEP_RATE5 = 32U;
 const uint32_t CHRYSLER_PARAM_JEEP_LONG_ACTUATION = 64U;
+const uint32_t CHRYSLER_PARAM_JEEP_FACTORY_SNG = 128U;
 
 typedef enum {
   CHRYSLER_RAM_DT,
@@ -223,6 +242,7 @@ static bool chrysler_jeep_rate4_enabled = false;
 static bool chrysler_jeep_rate5_enabled = false;
 static bool chrysler_long_diagnostic_enabled = false;
 static bool chrysler_long_actuation_enabled = false;
+static bool chrysler_factory_sng_enabled = false;
 static bool chrysler_long_stock_collision = false;
 static bool chrysler_long_dashboard_fault = false;
 static bool chrysler_long_dashboard_seen = false;
@@ -446,10 +466,12 @@ static void chrysler_b6y_hold_clear(void) {
 
 static bool chrysler_b6y_hold_sources_valid(void) {
   const uint32_t now = microsecond_timer_get();
-  return chrysler_long_actuation_enabled &&
+  return (chrysler_long_actuation_enabled || chrysler_factory_sng_enabled) &&
          (chrysler_platform == CHRYSLER_PACIFICA) &&
          chrysler_das_3_last_valid &&
-         acc_main_on && !vehicle_moving &&
+         acc_main_on &&
+         (chrysler_long_vehicle_speed_raw <=
+          CHRYSLER_B6Y_HOLD_CREEP_MAX_RAW) &&
          !gas_pressed && !brake_pressed &&
          !chrysler_long_stock_collision &&
          !chrysler_long_dashboard_fault &&
@@ -790,7 +812,8 @@ static bool chrysler_long_torque_tx_allowed(const CANPacket_t *to_send) {
     const bool running_torque_valid =
       (chrysler_long_vehicle_speed_raw >=
        CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
-      (torque_raw <= CHRYSLER_LONG_TORQUE_MAX_RAW);
+      (torque_raw <= chrysler_long_running_torque_max_raw(
+        chrysler_long_vehicle_speed_raw));
     const bool launch_torque_valid =
       (chrysler_long_vehicle_speed_raw <
        CHRYSLER_LONG_ENGINE_SPEED_MIN_RAW) &&
@@ -855,8 +878,10 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     chrysler_long_dashboard_seen = true;
     chrysler_long_dashboard_ts = microsecond_timer_get();
     if (chrysler_long_dashboard_fault &&
-        chrysler_long_actuation_enabled) {
-      controls_allowed_long = false;
+        (chrysler_long_actuation_enabled || chrysler_factory_sng_enabled)) {
+      if (chrysler_long_actuation_enabled) {
+        controls_allowed_long = false;
+      }
       chrysler_long_enable_press_qualified = false;
       chrysler_b6y_hold_clear();
       chrysler_long_reset_pending();
@@ -953,7 +978,8 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
     vehicle_moving = (speed_l != 0) || (speed_r != 0);
     chrysler_long_speed_ts = microsecond_timer_get();
     chrysler_long_speed_seen = true;
-    if (vehicle_moving) {
+    if (chrysler_long_vehicle_speed_raw >
+        CHRYSLER_B6Y_HOLD_CREEP_MAX_RAW) {
       chrysler_b6y_hold_clear();
     }
   }
@@ -1108,6 +1134,7 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_jeep_rate5_enabled = false;
   chrysler_long_diagnostic_enabled = false;
   chrysler_long_actuation_enabled = false;
+  chrysler_factory_sng_enabled = false;
   chrysler_long_stock_collision = false;
   chrysler_long_speed_seen = false;
   chrysler_long_gas_seen = false;
@@ -1159,9 +1186,18 @@ static safety_config chrysler_init(uint16_t param) {
     chrysler_long_actuation_enabled =
       chrysler_long_shadow_enabled &&
       GET_FLAG(param, CHRYSLER_PARAM_JEEP_LONG_ACTUATION);
+    chrysler_factory_sng_enabled =
+      !chrysler_long_shadow_enabled &&
+      GET_FLAG(param, CHRYSLER_PARAM_JEEP_FACTORY_SNG);
     if (chrysler_long_shadow_enabled) {
       ret = BUILD_SAFETY_CFG(chrysler_long_rx_checks,
                              CHRYSLER_LONG_SHADOW_TX_MSGS);
+    } else if (chrysler_factory_sng_enabled) {
+      // Factory ACC retains normal PCM cruise ownership. The richer receive
+      // checks provide the fresh DAS_4/button/pedal sources required by the
+      // exact standstill-hold guard, while the base transmit whitelist keeps
+      // all private openpilot-long frames blocked.
+      ret = BUILD_SAFETY_CFG(chrysler_long_rx_checks, CHRYSLER_TX_MSGS);
     } else {
       ret = BUILD_SAFETY_CFG(chrysler_rx_checks, CHRYSLER_TX_MSGS);
     }

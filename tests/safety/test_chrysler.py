@@ -240,6 +240,16 @@ class TestChryslerB6yHoldSafety(common.PandaSafetyTestBase):
     self.safety.set_timer(2_000_000 + self.SOURCE_TIMEOUT_US + 1)
     self.assertFalse(self._tx(self._hold_msg()))
 
+  def test_hold_tolerates_only_bounded_near_zero_creep(self):
+    self._enable_hold_sources()
+    self.assertTrue(self._rx(self._speed_msg(0.1)))
+    self.assertTrue(self._tx(self._hold_msg()))
+
+    self._reset_hold_safety()
+    self._enable_hold_sources()
+    self.assertTrue(self._rx(self._speed_msg(0.2)))
+    self.assertFalse(self._tx(self._hold_msg()))
+
   def test_cancel_clears_special_resume_authority(self):
     self._enable_hold_sources()
     self.assertTrue(self._tx(self._hold_msg()))
@@ -251,6 +261,16 @@ class TestChryslerB6yHoldSafety(common.PandaSafetyTestBase):
     self.assertTrue(self._tx(self._hold_msg()))
     self.assertTrue(self._rx(self._das_4_msg(faulted=True)))
     self.assertFalse(self._tx(self._hold_msg(counter=4)))
+
+
+class TestChryslerFactoryStopGoSafety(TestChryslerB6yHoldSafety):
+  """Factory ownership plus only the proven standstill hold/resume bridge."""
+  HOLD_PARAM = Panda.FLAG_CHRYSLER_JEEP_FACTORY_SNG
+
+  def test_private_openpilot_long_frames_remain_blocked(self):
+    self._enable_hold_sources()
+    for addr in (0x1F6, 0x1F7, 0x272):
+      self.assertFalse(self._tx(common.make_msg(0, addr, length=8)))
 
 
 class TestJeepRate4Limits(unittest.TestCase):
@@ -653,7 +673,7 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     )
     self.assertEqual(
       self._tx_private_cycle(
-        15, 20_000, torque_raw=3760, engine_request=True,
+        15, 20_000, torque_raw=3075, engine_request=True,
       ),
       (True, True, True),
     )
@@ -750,11 +770,11 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       (True, True, True),
     )
 
-  def test_b6w_running_torque_ceiling_is_440_nm(self):
+  def test_b7s_running_torque_ceiling_is_500_nm_and_speed_shaped(self):
     self._enable_safe_source()
     self.assertEqual(
       self._tx_private_cycle(
-        0, 0, torque_raw=3760, engine_request=True,
+        0, 0, torque_raw=3075, engine_request=True,
       ),
       (True, True, True),
     )
@@ -763,7 +783,27 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self._enable_safe_source()
     self.assertEqual(
       self._tx_private_cycle(
-        0, 0, torque_raw=3761, engine_request=True,
+        0, 0, torque_raw=3085, engine_request=True,
+      ),
+      (True, True, False),
+    )
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(16.0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=4000, engine_request=True,
+      ),
+      (True, True, True),
+    )
+
+    self._reset_long_shadow()
+    self._enable_safe_source()
+    self.assertTrue(self._rx(self._speed_msg(16.0)))
+    self.assertEqual(
+      self._tx_private_cycle(
+        0, 0, torque_raw=4001, engine_request=True,
       ),
       (True, True, False),
     )
