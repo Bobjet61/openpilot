@@ -9,6 +9,10 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.swaglog import cloudlog
 from openpilot.selfdrive.car import apply_meas_steer_torque_limits
 from openpilot.selfdrive.car.chrysler import chryslercan
+from openpilot.selfdrive.car.chrysler.jeep_camera_lead_trend_shadow import (
+  JeepCameraLeadTrendShadow,
+  jeep_camera_lead_trend_runtime_eligible,
+)
 from openpilot.selfdrive.car.chrysler.jeep_radar_shadow import JeepVisionLead
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   JEEP_LONG_ACTUATION_COMPILED,
@@ -96,6 +100,11 @@ class CarController(CarControllerBase):
       if CP.carFingerprint in JEEP_LONG_CARS else None
     )
     self.jeep_radar_brake_guard_result = None
+    self.jeep_camera_lead_trend_shadow = (
+      JeepCameraLeadTrendShadow()
+      if CP.carFingerprint in JEEP_LONG_CARS else None
+    )
+    self.jeep_camera_lead_trend_result = None
     self.jeep_steering_model_sm = (
       messaging.SubMaster(["modelV2"])
       if CP.carFingerprint in JEEP_LONG_CARS else None
@@ -198,6 +207,7 @@ class CarController(CarControllerBase):
     jeep_long_vehicle_eligible, jeep_long_vehicle_reason = (
       self.jeep_long_vehicle_eligibility(CC, CS)
     )
+    self.update_jeep_camera_lead_trend_shadow(CC, CS, now_nanos)
     if self.jeep_radar_brake_guard is not None:
       radar_shadow = CS.jeep_radar_shadow
       self.jeep_radar_brake_guard_result = (
@@ -317,6 +327,7 @@ class CarController(CarControllerBase):
       self.log_wp_long_diagnostic(CS)
       self.log_jeep_long_plan_shadow(CS)
       self.log_jeep_radar_shadow(CS)
+      self.log_jeep_camera_lead_trend_shadow()
       self.log_jeep_steering_shadow()
       self.log_jeep_steering_rate5_shadow()
 
@@ -765,6 +776,75 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_vision = vision
     self.jeep_radar_shadow_reason_counts[selection.reason] += 1
 
+  def update_jeep_camera_lead_trend_shadow(self, CC, CS, now_nanos):
+    """Update the passive camera-range observer; never alter control state."""
+    if (
+        self.jeep_camera_lead_trend_shadow is None
+        or self.jeep_radar_shadow_sm is None
+    ):
+      return
+
+    radar_state_seen = self.jeep_radar_shadow_sm.seen["radarState"]
+    radar_state_valid = (
+      radar_state_seen
+      and self.jeep_radar_shadow_sm.valid["radarState"]
+    )
+    radar_state = self.jeep_radar_shadow_sm["radarState"]
+    model_mono_time_ns = int(radar_state.mdMonoTime) if radar_state_valid else 0
+    model_age_ns = (
+      now_nanos - model_mono_time_ns
+      if model_mono_time_ns > 0 else 2**63 - 1
+    )
+    lead = radar_state.leadOne
+
+    scoped_to_jeep_wp_op_long = bool(
+      JEEP_LONG_ACTUATION_COMPILED
+      and self.CP.carFingerprint in JEEP_LONG_CARS
+      and self.CP.openpilotLongitudinalControl
+      and self.CP.spFlags & ChryslerFlagsSP.SP_WP_S20
+    )
+    eligible = jeep_camera_lead_trend_runtime_eligible(
+      scoped_to_jeep_wp_op_long=scoped_to_jeep_wp_op_long,
+      inputs_valid=radar_state_valid and model_mono_time_ns > 0,
+      model_age_ns=model_age_ns,
+      controls_enabled=CC.enabled,
+      long_controls_active=CC.longActive,
+      cruise_available=CS.out.cruiseState.available,
+      cruise_enabled=CS.out.cruiseState.enabled,
+      forward_gear=CS.out.gearShifter in FORWARD_GEARS,
+      brake_pressed=CS.out.brakePressed,
+      gas_pressed=CS.out.gasPressed,
+      stock_aeb=CS.out.stockAeb,
+      acc_faulted=CS.out.accFaulted,
+    )
+
+    # Raw FCA radar is passed only as an optional annotation.  Selection and
+    # freshness cannot affect any camera candidate gate or control output.
+    selection = self.jeep_radar_shadow_selection
+    radar_track = (
+      selection.track
+      if selection is not None and selection.track is not None else None
+    )
+    radar_age_ns = (
+      int(max(0, self.frame - self.jeep_radar_shadow_update_frame) * DT_CTRL * 1e9)
+      if radar_track is not None else None
+    )
+    self.jeep_camera_lead_trend_result = (
+      self.jeep_camera_lead_trend_shadow.update(
+        eligible=eligible,
+        model_mono_time_ns=model_mono_time_ns,
+        model_age_ns=model_age_ns,
+        v_ego_mps=CS.out.vEgo,
+        vision_status=lead.status,
+        vision_radar=lead.radar,
+        model_probability=lead.modelProb,
+        d_rel_m=lead.dRel,
+        radar_d_rel_m=(radar_track.d_rel if radar_track is not None else None),
+        radar_v_rel_mps=(radar_track.v_rel if radar_track is not None else None),
+        radar_age_ns=radar_age_ns,
+      )
+    )
+
   def log_jeep_long_plan_shadow(self, CS):
     if (
         self.jeep_long_plan_shadow is None
@@ -886,6 +966,52 @@ class CarController(CarControllerBase):
       f"window={reason_counts},last={last_result}"
     )
     self.jeep_radar_shadow_reason_counts.clear()
+
+  def log_jeep_camera_lead_trend_shadow(self):
+    if (
+        self.jeep_camera_lead_trend_shadow is None
+        or self.jeep_camera_lead_trend_result is None
+    ):
+      return
+
+    result = self.jeep_camera_lead_trend_result
+    window = self.jeep_camera_lead_trend_shadow.snapshot()
+    reason_counts = "|".join(
+      f"{reason}:{count}" for reason, count in window.reason_counts
+    ) or "none"
+    closing = (
+      "none" if result.observed_closing_mps is None
+      else f"{result.observed_closing_mps:.3f}"
+    )
+    ttc = (
+      "none" if result.camera_ttc_s is None
+      else f"{result.camera_ttc_s:.3f}"
+    )
+    radar_error = (
+      "none" if result.radar_distance_error_m is None
+      else f"{result.radar_distance_error_m:.3f}"
+    )
+    cloudlog.info(
+      f"Jeep camera lead trend shadow: distinct={window.distinct_samples},"
+      f"eligible={window.eligible_samples},"
+      f"hazard_samples={window.hazard_samples},"
+      f"hazard_events={window.hazard_events},"
+      f"radar_corroborated_hazards="
+      f"{window.radar_corroborated_hazard_samples},"
+      f"reasons={reason_counts},"
+      f"candidate={result.hazard_candidate},"
+      f"last_reason={result.reason},"
+      f"samples={result.sample_count},"
+      f"span={result.window_span_s:.3f},"
+      f"camera_d={result.d_rel_m},"
+      f"camera_closing={closing},"
+      f"camera_ttc={ttc},"
+      f"monotonic={result.monotonic_fraction:.3f},"
+      f"radar_corroborated={result.radar_corroborated},"
+      f"radar_d={result.radar_d_rel_m},"
+      f"radar_v={result.radar_v_rel_mps},"
+      f"radar_error={radar_error}"
+    )
 
   def log_jeep_steering_shadow(self):
     if self.jeep_steering_shadow is None:
