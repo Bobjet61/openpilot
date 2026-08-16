@@ -74,6 +74,7 @@ const SteeringLimits CHRYSLER_JEEP_RATE5_STEERING_LIMITS = {
 #define CHRYSLER_LONG_SOURCE_TIMEOUT_US 100000U
 #define CHRYSLER_LONG_MIN_CYCLE_INTERVAL_US 15000U
 #define CHRYSLER_LONG_COUNTER_RESET_US 100000U
+#define CHRYSLER_LONG_STALE_BUTTON_RELEASE_TIMEOUT_US 30000U
 #define CHRYSLER_B6Y_HOLD_DECEL_RAW 2866
 #define CHRYSLER_B6Y_HOLD_TIMEOUT_US 100000U
 // SPEED_1 uses about 0.071 m/s per raw count. Keep the exact braking-only
@@ -190,17 +191,33 @@ RxCheck chrysler_rx_checks[] = {
 // Full longitudinal control uses physical SET/RES releases to re-arm after a
 // pedal override. Keep that input behind the same checksum/counter validation
 // as the other safety-critical vehicle sources without changing stock modes.
-RxCheck chrysler_long_rx_checks[] = {
-  {.msg = {{CHRYSLER_ADDRS.EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
-  {.msg = {{CHRYSLER_ADDRS.ESP_1, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
-  {.msg = {{514, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 100U}, { 0 }, { 0 }}},
-  {.msg = {{CHRYSLER_ADDRS.ECM_5, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
-  {.msg = {{CHRYSLER_ADDRS.DAS_3, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
-  {.msg = {{CHRYSLER_ADDRS.CRUISE_BUTTONS, 0, 3, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+typedef enum {
+  CHRYSLER_LONG_RX_CHECK_EPS_2 = 0U,
+  CHRYSLER_LONG_RX_CHECK_ESP_1,
+  CHRYSLER_LONG_RX_CHECK_STEERING,
+  CHRYSLER_LONG_RX_CHECK_ECM_5,
+  CHRYSLER_LONG_RX_CHECK_DAS_3,
+  CHRYSLER_LONG_RX_CHECK_CRUISE_BUTTONS,
+  CHRYSLER_LONG_RX_CHECK_DAS_4,
+  CHRYSLER_LONG_RX_CHECK_COUNT,
+} ChryslerLongRxCheckIndex;
+
+RxCheck chrysler_long_rx_checks[CHRYSLER_LONG_RX_CHECK_COUNT] = {
+  [CHRYSLER_LONG_RX_CHECK_EPS_2] = {.msg = {{CHRYSLER_ADDRS.EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
+  [CHRYSLER_LONG_RX_CHECK_ESP_1] = {.msg = {{CHRYSLER_ADDRS.ESP_1, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  [CHRYSLER_LONG_RX_CHECK_STEERING] = {.msg = {{514, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 100U}, { 0 }, { 0 }}},
+  [CHRYSLER_LONG_RX_CHECK_ECM_5] = {.msg = {{CHRYSLER_ADDRS.ECM_5, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  [CHRYSLER_LONG_RX_CHECK_DAS_3] = {.msg = {{CHRYSLER_ADDRS.DAS_3, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
+  [CHRYSLER_LONG_RX_CHECK_CRUISE_BUTTONS] = {.msg = {{CHRYSLER_ADDRS.CRUISE_BUTTONS, 0, 3, .check_checksum = true, .max_counter = 15U, .frequency = 50U}, { 0 }, { 0 }}},
   // DAS_4 has no checksum or counter in the FCA DBC. Its 50 Hz liveness and
   // dashboard ACC fault bit are nevertheless independent longitudinal gates.
-  {.msg = {{CHRYSLER_LONG_DAS_4_ADDR, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 50U}, { 0 }, { 0 }}},
+  [CHRYSLER_LONG_RX_CHECK_DAS_4] = {.msg = {{CHRYSLER_LONG_DAS_4_ADDR, 0, 8, .check_checksum = false, .max_counter = 0U, .frequency = 50U}, { 0 }, { 0 }}},
 };
+
+_Static_assert(
+  (sizeof(chrysler_long_rx_checks) / sizeof(chrysler_long_rx_checks[0])) ==
+    CHRYSLER_LONG_RX_CHECK_COUNT,
+  "Chrysler longitudinal Rx-check index and array must stay aligned");
 
 RxCheck chrysler_ram_dt_rx_checks[] = {
   {.msg = {{CHRYSLER_RAM_DT_ADDRS.EPS_2, 0, 8, .check_checksum = true, .max_counter = 15U, .frequency = 100U}, { 0 }, { 0 }}},
@@ -271,6 +288,14 @@ static bool chrysler_b6y_hold_active = false;
 static uint32_t chrysler_b6y_hold_last_ts = 0U;
 static uint8_t chrysler_long_enable_button_prev = 0U;
 static bool chrysler_long_enable_press_qualified = false;
+// Some Jeep SCCM releases advance the rolling counter and clear the button
+// byte after calculating the checksum. Keep only the last generic-valid
+// button frame so that exact, short-lived instances of that measured release
+// convention can be recognized without weakening checksum checks generally.
+static bool chrysler_long_button_history_valid = false;
+static uint8_t chrysler_long_button_history_buttons = 0U;
+static uint8_t chrysler_long_button_history_counter = 0U;
+static uint32_t chrysler_long_button_history_ts = 0U;
 
 typedef enum {
   CHRYSLER_LONG_REJECT_NONE = 0U,
@@ -411,11 +436,6 @@ static void chrysler_long_set_reject(const uint8_t reason,
   }
 }
 
-static uint32_t chrysler_get_checksum(const CANPacket_t *to_push) {
-  int checksum_byte = GET_LEN(to_push) - 1U;
-  return (uint8_t)(GET_BYTE(to_push, checksum_byte));
-}
-
 static uint32_t chrysler_compute_checksum(const CANPacket_t *to_push) {
   // TODO: clean this up
   // http://illmatics.com/Remote%20Car%20Hacking.pdf
@@ -447,6 +467,68 @@ static uint32_t chrysler_compute_checksum(const CANPacket_t *to_push) {
     }
   }
   return (uint8_t)(~checksum);
+}
+
+static bool chrysler_long_exact_stale_button_release(
+    const CANPacket_t *to_push, const uint32_t supplied_checksum) {
+  const bool rich_button_checks =
+    chrysler_long_shadow_enabled || chrysler_factory_sng_enabled;
+  const uint8_t previous_buttons = chrysler_long_button_history_buttons;
+  const bool previous_single_enable =
+    (previous_buttons == 0x04U) || (previous_buttons == 0x08U) ||
+    (previous_buttons == 0x10U);
+  const uint8_t current_counter =
+    (uint8_t)((GET_BYTE(to_push, 1) >> 4) & 0xFU);
+  const uint8_t expected_counter =
+    (uint8_t)((chrysler_long_button_history_counter + 1U) & 0xFU);
+  const RxStatus previous_button_status =
+    chrysler_long_rx_checks[
+      CHRYSLER_LONG_RX_CHECK_CRUISE_BUTTONS].status;
+  const bool previous_button_rx_healthy =
+    previous_button_status.msg_seen &&
+    previous_button_status.valid_checksum &&
+    previous_button_status.valid_quality_flag &&
+    (previous_button_status.wrong_counters == 0U) &&
+    (previous_button_status.last_counter ==
+     chrysler_long_button_history_counter);
+  const bool recent = get_ts_elapsed(
+    microsecond_timer_get(), chrysler_long_button_history_ts) <=
+    CHRYSLER_LONG_STALE_BUTTON_RELEASE_TIMEOUT_US;
+
+  if (!rich_button_checks ||
+      (chrysler_platform != CHRYSLER_PACIFICA) ||
+      !chrysler_long_button_history_valid || !previous_single_enable ||
+      !previous_button_rx_healthy ||
+      (GET_BUS(to_push) != 0) ||
+      (GET_ADDR(to_push) != chrysler_addrs->CRUISE_BUTTONS) ||
+      (GET_LEN(to_push) != 3) || (GET_BYTE(to_push, 0) != 0U) ||
+      ((GET_BYTE(to_push, 1) & 0xFU) != 0U) ||
+      (current_counter != expected_counter) || !recent) {
+    return false;
+  }
+
+  // Validate the supplied checksum against this exact payload with only the
+  // immediately preceding single SET+/SET-/RESUME button restored. No other
+  // byte, counter, checksum, button combination, or timing exception is
+  // accepted.
+  CANPacket_t reconstructed = *to_push;
+  reconstructed.data[0] = previous_buttons;
+  return supplied_checksum == chrysler_compute_checksum(&reconstructed);
+}
+
+static uint32_t chrysler_get_checksum(const CANPacket_t *to_push) {
+  const int checksum_byte = GET_LEN(to_push) - 1U;
+  const uint32_t supplied_checksum =
+    (uint8_t)(GET_BYTE(to_push, checksum_byte));
+  const uint32_t computed_checksum = chrysler_compute_checksum(to_push);
+
+  // Present only the constrained SCCM stale-release encoding as checksum-
+  // valid to the generic safety layer. All other mismatches retain the raw
+  // supplied checksum and therefore follow the normal immediate revoke path.
+  return ((supplied_checksum != computed_checksum) &&
+          chrysler_long_exact_stale_button_release(
+            to_push, supplied_checksum)) ?
+    computed_checksum : supplied_checksum;
 }
 
 static uint8_t chrysler_get_counter(const CANPacket_t *to_push) {
@@ -936,6 +1018,26 @@ static void chrysler_rx_hook(const CANPacket_t *to_push) {
 
   if ((bus == 0) && (addr == chrysler_addrs->CRUISE_BUTTONS) &&
       (GET_LEN(to_push) == 3) &&
+      (chrysler_long_shadow_enabled || chrysler_factory_sng_enabled)) {
+    // safety_rx_hook invokes this platform hook only after the generic
+    // checksum/counter checks accept the frame. Require a fully clean counter
+    // sequence as well, so neither a corrupt frame nor a tolerated counter
+    // mismatch can seed the narrow stale-release rule.
+    const RxStatus button_status =
+      chrysler_long_rx_checks[
+        CHRYSLER_LONG_RX_CHECK_CRUISE_BUTTONS].status;
+    const bool clean_button_sequence = button_status.wrong_counters == 0U;
+    chrysler_long_button_history_valid = clean_button_sequence;
+    if (clean_button_sequence) {
+      chrysler_long_button_history_buttons = GET_BYTE(to_push, 0);
+      chrysler_long_button_history_counter =
+        (uint8_t)((GET_BYTE(to_push, 1) >> 4) & 0xFU);
+      chrysler_long_button_history_ts = microsecond_timer_get();
+    }
+  }
+
+  if ((bus == 0) && (addr == chrysler_addrs->CRUISE_BUTTONS) &&
+      (GET_LEN(to_push) == 3) &&
       chrysler_long_actuation_enabled) {
     const uint8_t enable_buttons = GET_BYTE(to_push, 0) & 0x1CU;
     const bool single_enable_button =
@@ -1151,6 +1253,10 @@ static safety_config chrysler_init(uint16_t param) {
   chrysler_b6y_hold_last_ts = 0U;
   chrysler_long_enable_button_prev = 0U;
   chrysler_long_enable_press_qualified = false;
+  chrysler_long_button_history_valid = false;
+  chrysler_long_button_history_buttons = 0U;
+  chrysler_long_button_history_counter = 0U;
+  chrysler_long_button_history_ts = 0U;
   chrysler_long_dashboard_fault = false;
   chrysler_long_dashboard_seen = false;
   chrysler_long_dashboard_ts = 0U;

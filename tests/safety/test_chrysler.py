@@ -267,6 +267,65 @@ class TestChryslerFactoryStopGoSafety(TestChryslerB6yHoldSafety):
   """Factory ownership plus only the proven standstill hold/resume bridge."""
   HOLD_PARAM = Panda.FLAG_CHRYSLER_JEEP_FACTORY_SNG
 
+  @staticmethod
+  def _fca_checksum(dat):
+    checksum = 0xFF
+    for current in dat[:-1]:
+      shift = 0x80
+      for _ in range(8):
+        bit_sum = current & shift
+        temp_checksum = checksum & 0x80
+        if bit_sum:
+          bit_sum = 0x1C
+          if temp_checksum:
+            bit_sum = 1
+          checksum = (checksum << 1) & 0xFF
+          bit_sum ^= checksum | 1
+        else:
+          if temp_checksum:
+            bit_sum = 0x1D
+          checksum = (checksum << 1) & 0xFF
+          bit_sum ^= checksum
+        checksum = bit_sum & 0xFF
+        shift >>= 1
+    return (~checksum) & 0xFF
+
+  def _raw_button_msg(self, buttons, counter, checksum_buttons=None):
+    dat = bytearray(3)
+    dat[0] = buttons
+    dat[1] = (counter & 0xF) << 4
+    checksum_dat = bytearray(dat)
+    if checksum_buttons is not None:
+      checksum_dat[0] = checksum_buttons
+    dat[2] = self._fca_checksum(checksum_dat)
+    return common.make_msg(0, 0x23B, dat=bytes(dat))
+
+  def _prime_button_counter(self, final_counter):
+    for counter in range(1, final_counter + 1):
+      self.assertTrue(self._rx(self._raw_button_msg(0x00, counter)))
+
+  def test_factory_sng_exact_stale_release_and_bad_crc(self):
+    self.safety.set_controls_allowed(True)
+    self.safety.set_timer(1_000_000)
+    self._prime_button_counter(6)
+    self.assertTrue(self._rx(self._raw_button_msg(0x04, 7)))
+    self.safety.set_timer(1_020_000)
+    self.assertTrue(self._rx(self._raw_button_msg(
+      0x00, 8, checksum_buttons=0x04,
+    )))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+    self._reset_hold_safety()
+    self.safety.set_controls_allowed(True)
+    self.safety.set_timer(2_000_000)
+    self._prime_button_counter(6)
+    self.assertTrue(self._rx(self._raw_button_msg(0x04, 7)))
+    self.safety.set_timer(2_020_000)
+    self.assertFalse(self._rx(self._raw_button_msg(
+      0x00, 8, checksum_buttons=0x08,
+    )))
+    self.assertFalse(self.safety.get_controls_allowed())
+
   def test_private_openpilot_long_frames_remain_blocked(self):
     self._enable_hold_sources()
     for addr in (0x1F6, 0x1F7, 0x272):
@@ -423,6 +482,28 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
       dat[2] ^= 1
       return common.make_msg(bus, 0x23B, dat=bytes(dat))
     return msg
+
+  def _raw_button_msg(self, buttons, counter, checksum_buttons=None, bus=0):
+    """Build 0x23B with an independently selectable checksum button byte."""
+    dat = bytearray(3)
+    dat[0] = buttons
+    dat[1] = (counter & 0xF) << 4
+    checksum_dat = bytearray(dat)
+    if checksum_buttons is not None:
+      checksum_dat[0] = checksum_buttons
+    dat[2] = self._fca_checksum(checksum_dat)
+    return common.make_msg(bus, 0x23B, dat=bytes(dat))
+
+  def _steer_cmd_msg(self, torque):
+    values = {
+      "STEERING_TORQUE": torque,
+      "LKAS_CONTROL_BIT": 1,
+    }
+    return self.packer.make_can_msg_panda("LKAS_COMMAND", 0, values)
+
+  def _prime_button_counter(self, final_counter):
+    for counter in range(1, final_counter + 1):
+      self.assertTrue(self._rx(self._raw_button_msg(0x00, counter)))
 
   @staticmethod
   def _fca_checksum(dat):
@@ -887,6 +968,180 @@ class TestChryslerLongShadowSafety(common.PandaSafetyTestBase):
     self.assertTrue(self.safety.get_longitudinal_allowed())
     self.assertTrue(self._rx(self._physical_button_msg(4, cancel=True)))
     self.assertFalse(self.safety.get_longitudinal_allowed())
+
+  def test_exact_route8_stale_button_release_is_accepted(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_500_000)
+    self._enable_safe_source(counter=1)
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self._prime_button_counter(6)
+
+    # Route 8 carried a normal SET+ at counter 7, followed one 20 ms cycle
+    # later by 00 80 b5: button byte cleared, counter advanced to 8, and CRC
+    # still calculated over SET+. This exact convention remains observable on
+    # RX while being accepted by the constrained safety rule.
+    press = self._raw_button_msg(0x04, 7)
+    self.assertEqual(bytes(press.data)[:3], b"\x04\x70\xca")
+    self.assertTrue(self._rx(press))
+    self.assertTrue(self._tx(self._steer_cmd_msg(1)))
+
+    self.safety.set_timer(2_520_000)
+    stale_release = self._raw_button_msg(
+      0x00, 8, checksum_buttons=0x04,
+    )
+    self.assertEqual(bytes(stale_release.data)[:3], b"\x00\x80\xb5")
+    self.assertTrue(self._rx(stale_release))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._tx(self._steer_cmd_msg(1)))
+
+    # The following ordinary no-button frame remains checksum/counter valid.
+    self.safety.set_timer(2_540_000)
+    self.assertTrue(self._rx(self._raw_button_msg(0x00, 9)))
+    self.assertTrue(self.safety.get_controls_allowed())
+
+  def test_stale_button_release_accepts_each_single_enable_button(self):
+    for buttons in (0x04, 0x08, 0x10):
+      with self.subTest(buttons=buttons):
+        self._reset_long_shadow(actuation=True)
+        self.safety.set_timer(2_550_000)
+        self._enable_safe_source(counter=1)
+        self._prime_button_counter(6)
+        self.assertTrue(self._rx(self._raw_button_msg(buttons, 7)))
+        self.safety.set_timer(2_570_000)
+        self.assertTrue(self._rx(self._raw_button_msg(
+          0x00, 8, checksum_buttons=buttons,
+        )))
+        self.assertTrue(self.safety.get_controls_allowed())
+        self.assertTrue(self.safety.get_longitudinal_allowed())
+
+  def test_stale_button_release_accepts_counter_wrap(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_600_000)
+    self._enable_safe_source(counter=1)
+    self._prime_button_counter(14)
+    self.assertTrue(self._rx(self._raw_button_msg(0x10, 15)))
+    self.safety.set_timer(2_620_000)
+    self.assertTrue(self._rx(self._raw_button_msg(
+      0x00, 0, checksum_buttons=0x10,
+    )))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+
+  def test_exact_route_c_held_button_wrap_stale_release_is_accepted(self):
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_800_000)
+    self._enable_safe_source(counter=1)
+    self._prime_button_counter(9)
+
+    # Route C held SET+ from 04 a0 32 through the rolling-counter wrap. Its
+    # eventual 00 10 5e release advanced to counter 1 but retained the SET+
+    # byte for CRC calculation. Prove that the immediately preceding held
+    # counter-0 frame, rather than an older press, is what seeds the exception.
+    press = self._raw_button_msg(0x04, 10)
+    self.assertEqual(bytes(press.data)[:3], b"\x04\xa0\x32")
+    self.assertTrue(self._rx(press))
+
+    time_us = 2_800_000
+    for counter in (11, 12, 13, 14, 15, 0):
+      time_us += 20_000
+      self.safety.set_timer(time_us)
+      self.assertTrue(self._rx(self._raw_button_msg(0x04, counter)))
+
+    self.safety.set_timer(time_us + 20_000)
+    stale_release = self._raw_button_msg(
+      0x00, 1, checksum_buttons=0x04,
+    )
+    self.assertEqual(bytes(stale_release.data)[:3], b"\x00\x10\x5e")
+    self.assertTrue(self._rx(stale_release))
+    self.assertTrue(self.safety.get_controls_allowed())
+    self.assertTrue(self.safety.get_longitudinal_allowed())
+    self.assertTrue(self._tx(self._steer_cmd_msg(1)))
+
+  def test_stale_button_release_requires_clean_immediate_history(self):
+    # No preceding single-button frame: the route-shaped stale CRC remains a
+    # normal safety violation.
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_650_000)
+    self._enable_safe_source(counter=1)
+    self._prime_button_counter(7)
+    self.assertFalse(self._rx(self._raw_button_msg(
+      0x00, 8, checksum_buttons=0x04,
+    )))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+    # A checksum-invalid intervening 0x23B poisons the generic RxStatus. It
+    # cannot leave an older valid press eligible for the narrow exception.
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_660_000)
+    self._enable_safe_source(counter=1)
+    self._prime_button_counter(6)
+    self.assertTrue(self._rx(self._raw_button_msg(0x04, 7)))
+    corrupt = self._raw_button_msg(0x02, 7)
+    corrupt_dat = bytearray(bytes(corrupt.data)[:3])
+    corrupt_dat[2] ^= 1
+    self.assertFalse(self._rx(common.make_msg(
+      0, 0x23B, dat=bytes(corrupt_dat),
+    )))
+    self.safety.set_controls_allowed(True)
+    self.safety.set_timer(2_680_000)
+    self.assertFalse(self._rx(self._raw_button_msg(
+      0x00, 8, checksum_buttons=0x04,
+    )))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+    # A checksum-valid press on a skipped counter is tolerated by the generic
+    # debounce, but cannot seed stale-release acceptance.
+    self._reset_long_shadow(actuation=True)
+    self.safety.set_timer(2_690_000)
+    self._enable_safe_source(counter=1)
+    self._prime_button_counter(6)
+    self.assertTrue(self._rx(self._raw_button_msg(0x04, 8)))
+    self.safety.set_timer(2_710_000)
+    self.assertFalse(self._rx(self._raw_button_msg(
+      0x00, 9, checksum_buttons=0x04,
+    )))
+    self.assertFalse(self.safety.get_controls_allowed())
+    self.assertFalse(self.safety.get_longitudinal_allowed())
+
+  def test_stale_button_release_exception_is_exact(self):
+    cases = (
+      ("wrong checksum", 0x04, 0x00, 8, 0x08, 20_000),
+      ("skipped counter", 0x04, 0x00, 9, 0x04, 20_000),
+      ("nonzero current button", 0x04, 0x01, 8, 0x04, 20_000),
+      ("distance-button low nibble", 0x04, 0x00, 8, 0x04, 20_000),
+      ("previous combined buttons", 0x0C, 0x00, 8, 0x0C, 20_000),
+      ("expired window", 0x04, 0x00, 8, 0x04, 30_001),
+    )
+    for (name, previous_buttons, current_buttons, current_counter,
+         checksum_buttons, delay) in cases:
+      with self.subTest(name=name):
+        self._reset_long_shadow(actuation=True)
+        self.safety.set_timer(2_700_000)
+        self._enable_safe_source(counter=1)
+        self._prime_button_counter(6)
+        self.assertTrue(self._rx(self._raw_button_msg(
+          previous_buttons, 7,
+        )))
+        self.safety.set_timer(2_700_000 + delay)
+
+        candidate = self._raw_button_msg(
+          current_buttons, current_counter,
+          checksum_buttons=checksum_buttons,
+        )
+        if name == "distance-button low nibble":
+          candidate_dat = bytearray(bytes(candidate.data)[:3])
+          candidate_dat[1] |= 1
+          checksum_dat = bytearray(candidate_dat)
+          checksum_dat[0] = checksum_buttons
+          candidate_dat[2] = self._fca_checksum(checksum_dat)
+          candidate = common.make_msg(0, 0x23B, dat=bytes(candidate_dat))
+        self.assertFalse(self._rx(candidate))
+        self.assertFalse(self.safety.get_controls_allowed())
+        self.assertFalse(self.safety.get_longitudinal_allowed())
 
   def test_long_rearm_rejects_corrupt_wrong_bus_and_stale_buttons(self):
     self._reset_long_shadow(actuation=True)
