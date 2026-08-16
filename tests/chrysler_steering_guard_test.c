@@ -71,12 +71,22 @@ int main(void) {
   assert(!chrysler_long_counter_step_valid(&seen, &last, 2));
   assert(chrysler_long_counter_step_valid(&seen, &last, 3));
 
-  // The ACC handoff must never rewrite wheel-button bits, counters, or
-  // checksums. Exercise empty, full, and representative payload words.
-  assert(chrysler_long_wheel_button_passthrough(0x00000000U) == 0x00000000U);
-  assert(chrysler_long_wheel_button_passthrough(0xFFFFFFFFU) == 0xFFFFFFFFU);
-  assert(chrysler_long_wheel_button_passthrough(0x12345678U) == 0x12345678U);
-  assert(chrysler_long_wheel_button_passthrough(0x00ABC080U) == 0x00ABC080U);
+  // Factory ownership remains a transparent wheel-button bridge. Exercise
+  // empty, full, and representative payload words through the current
+  // mode-aware arbiter rather than the removed legacy passthrough helper.
+  const uint32_t factory_payloads[] = {
+    0x00000000U,
+    0xFFFFFFFFU,
+    0x12345678U,
+    0x00ABC080U,
+  };
+  for (unsigned int i = 0U;
+       i < sizeof(factory_payloads) / sizeof(factory_payloads[0]); i++) {
+    const uint32_t payload = factory_payloads[i];
+    const uint8_t buttons = (uint8_t)(payload & 0xFFU);
+    assert(chrysler_long_arbitrate_wheel_button_payload(
+      payload, buttons, buttons, CHRYSLER_LONG_OWNER_OFF) == payload);
+  }
 
   return 0;
 }

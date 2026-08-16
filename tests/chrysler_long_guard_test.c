@@ -151,6 +151,99 @@ int main(void) {
   assert(chrysler_long_filter_button_byte(
     0x9EU, CHRYSLER_LONG_OWNER_OFF) == 0x9EU);
 
+  // Forwarding precedes safety_rx_hook on this White Panda. Factory ownership
+  // remains transparent even for FCA's native stale-release CRC, but an
+  // invalid frame must never be rebuilt into a valid command while filtering
+  // is authoritative for Cancel/openpilot ownership.
+  assert(chrysler_long_wheel_button_frame_allowed(
+    CHRYSLER_LONG_OWNER_OFF, false));
+  assert(chrysler_long_wheel_button_frame_allowed(
+    CHRYSLER_LONG_OWNER_FAILED, false));
+  assert(!chrysler_long_wheel_button_frame_allowed(
+    CHRYSLER_LONG_OWNER_CANCELING, false));
+  assert(!chrysler_long_wheel_button_frame_allowed(
+    CHRYSLER_LONG_OWNER_OPENPILOT, false));
+  assert(chrysler_long_wheel_button_frame_allowed(
+    CHRYSLER_LONG_OWNER_CANCELING, true));
+  assert(chrysler_long_wheel_button_frame_allowed(
+    CHRYSLER_LONG_OWNER_OPENPILOT, true));
+
+  // Route C's physical SET+ release carried FCA's known stale-release CRC:
+  // 00 10 5e (the 5e was computed with the prior 04 button byte). Factory
+  // ownership must send that exact native frame to both ACC and EPS, restoring
+  // the pre-CAN2 topology rather than giving the two modules different CRCs.
+  const uint32_t stale_set_release = 0x005E1000U;
+  const uint8_t factory_release_buttons = chrysler_long_filter_button_byte(
+    0x00U, CHRYSLER_LONG_OWNER_OFF);
+  assert(!chrysler_long_wheel_button_requires_rebuild(
+    0x00U, factory_release_buttons, CHRYSLER_LONG_OWNER_OFF));
+  assert(chrysler_long_arbitrate_wheel_button_payload(
+    stale_set_release,
+    0x00U,
+    factory_release_buttons,
+    CHRYSLER_LONG_OWNER_OFF) == stale_set_release);
+  // Its canonical CRC is intentionally different, proving this regression is
+  // checking preservation rather than accidentally accepting both encodings.
+  assert(chrysler_fca_wheel_button_checksum(0x00U, 0x10U) == 0x73U);
+  assert(chrysler_fca_wheel_button_checksum(0x04U, 0x10U) == 0x5EU);
+  assert(chrysler_fca_wheel_button_checksum(0x04U, 0xA0U) == 0x32U);
+  assert(chrysler_fca_wheel_button_checksum(0x00U, 0x20U) == 0x39U);
+
+  // Ordinary factory SET+ also remains byte-for-byte untouched.
+  const uint8_t factory_set_buttons = chrysler_long_filter_button_byte(
+    0x04U, CHRYSLER_LONG_OWNER_OFF);
+  assert(!chrysler_long_wheel_button_requires_rebuild(
+    0x04U, factory_set_buttons, CHRYSLER_LONG_OWNER_OFF));
+  assert(chrysler_long_arbitrate_wheel_button_payload(
+    0x0032A004U,
+    0x04U,
+    factory_set_buttons,
+    CHRYSLER_LONG_OWNER_OFF) == 0x0032A004U);
+
+  // During openpilot ownership, Set/Resume/speed-adjust bits are removed and
+  // the CRC is rebuilt for the filtered byte instead of forwarding a stale
+  // checksum to either receiver.
+  const uint8_t owned_buttons = chrysler_long_filter_button_byte(
+    0x9FU, CHRYSLER_LONG_OWNER_OPENPILOT);
+  assert(owned_buttons == 0x83U);
+  assert(chrysler_long_wheel_button_requires_rebuild(
+    0x9FU, owned_buttons, CHRYSLER_LONG_OWNER_OPENPILOT));
+  const uint32_t owned_payload = chrysler_long_arbitrate_wheel_button_payload(
+    0x0000A09FU,
+    0x9FU,
+    owned_buttons,
+    CHRYSLER_LONG_OWNER_OPENPILOT);
+  assert((owned_payload & 0xFFU) == 0x83U);
+  assert(((owned_payload >> 8) & 0xFFU) == 0xA0U);
+  assert(((owned_payload >> 16) & 0xFFU) ==
+         chrysler_fca_wheel_button_checksum(0x83U, 0xA0U));
+
+  // Cancel/openpilot ownership rebuilds even a button byte that survives the
+  // filter unchanged; canonical CRC is part of the ownership contract.
+  assert(chrysler_long_wheel_button_requires_rebuild(
+    0x01U, 0x01U, CHRYSLER_LONG_OWNER_OPENPILOT));
+  assert(chrysler_long_wheel_button_requires_rebuild(
+    0x00U, 0x01U, CHRYSLER_LONG_OWNER_CANCELING));
+
+  // Factory stop/go replay is the one owner-OFF case that changes byte 0, so
+  // it must also be rebuilt before the same injected Resume reaches both legs.
+  assert(chrysler_long_wheel_button_requires_rebuild(
+    CHRYSLER_FACTORY_SNG_BUTTON_NONE,
+    CHRYSLER_FACTORY_SNG_BUTTON_RESUME,
+    CHRYSLER_LONG_OWNER_OFF));
+  const uint32_t factory_sng_payload =
+    chrysler_long_arbitrate_wheel_button_payload(
+      0x005E1000U,
+      CHRYSLER_FACTORY_SNG_BUTTON_NONE,
+      CHRYSLER_FACTORY_SNG_BUTTON_RESUME,
+      CHRYSLER_LONG_OWNER_OFF);
+  assert((factory_sng_payload & 0xFFU) ==
+         CHRYSLER_FACTORY_SNG_BUTTON_RESUME);
+  assert(((factory_sng_payload >> 8) & 0xFFU) == 0x10U);
+  assert(((factory_sng_payload >> 16) & 0xFFU) ==
+         chrysler_fca_wheel_button_checksum(
+           CHRYSLER_FACTORY_SNG_BUTTON_RESUME, 0x10U));
+
   // A healthy 25 Hz private snapshot remains fresh throughout the independent
   // 50 Hz stock receive cadence. Liveness depends on elapsed time, not on a
   // comparison between the two unrelated frame counts.

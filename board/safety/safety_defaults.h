@@ -266,29 +266,8 @@ static uint8_t fca_compute_checksum(CAN_FIFOMailBox_TypeDef *to_push) {
   uint8_t checksum = 0xFF;
   int len = GET_LEN(to_push);
   for (int j = 0; j < (len - 1); j++) {
-    uint8_t shift = 0x80;
-    uint8_t curr = (uint8_t)GET_BYTE(to_push, j);
-    for (int i=0; i<8; i++) {
-      uint8_t bit_sum = curr & shift;
-      uint8_t temp_chk = checksum & 0x80U;
-      if (bit_sum != 0U) {
-        bit_sum = 0x1C;
-        if (temp_chk != 0U) {
-          bit_sum = 1;
-        }
-        checksum = checksum << 1;
-        temp_chk = checksum | 1U;
-        bit_sum ^= temp_chk;
-      } else {
-        if (temp_chk != 0U) {
-          bit_sum = 0x1D;
-        }
-        checksum = checksum << 1;
-        bit_sum ^= checksum;
-      }
-      checksum = bit_sum;
-      shift = shift >> 1;
-    }
+    checksum = chrysler_fca_checksum_step(
+      checksum, (uint8_t)GET_BYTE(to_push, j));
   }
   return ~checksum;
 }
@@ -524,6 +503,13 @@ static bool send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
   const bool button_checksum_valid =
     (GET_LEN(to_fwd) == 3) &&
     (GET_BYTE(to_fwd, 2) == fca_compute_checksum(to_fwd));
+  if (!chrysler_long_wheel_button_frame_allowed(
+      chrysler_long_owner_state, button_checksum_valid)) {
+    // Forwarding happens before safety_rx_hook(). Never bless an arbitrary
+    // checksum-invalid physical frame by rebuilding it for ACC or EPS while
+    // Cancel/openpilot filtering owns the button stream.
+    return false;
+  }
   const bool factory_resume_context =
     !is_oplong_enabled && button_checksum_valid &&
     chrysler_factory_sng_resume_context_valid(
@@ -595,13 +581,11 @@ static bool send_wheel_button_msg(CAN_FIFOMailBox_TypeDef *to_fwd){
     (chrysler_long_owner_state == CHRYSLER_LONG_OWNER_CANCELING) &&
     ((original_buttons & 0x01U) == 0U) &&
     ((filtered_buttons & 0x01U) != 0U);
-  to_fwd->RDLR &= ~0xFFU;
-  to_fwd->RDLR |= filtered_buttons;
-  // CRUISE_BUTTONS is three bytes: retain its counter in byte 1 and rebuild
-  // byte 2 after changing byte 0.
-  to_fwd->RDLR &= 0x0000FFFFU;
-  const uint8_t crc = fca_compute_checksum(to_fwd);
-  to_fwd->RDLR |= (uint32_t)crc << 16;
+  to_fwd->RDLR = chrysler_long_arbitrate_wheel_button_payload(
+    to_fwd->RDLR,
+    original_buttons,
+    filtered_buttons,
+    chrysler_long_owner_state);
   return true;
 }
 

@@ -405,6 +405,102 @@ static inline bool chrysler_long_should_substitute_das3(
          (stock_fault == 0) && !stock_collision;
 }
 
+// FCA CRC-8/J1850 update used by every checksum-protected Chrysler frame.
+// Keeping the byte step here lets the wheel-button arbiter be regression
+// tested without constructing a hardware CAN mailbox.
+static inline uint8_t chrysler_fca_checksum_step(
+    uint8_t checksum,
+    const uint8_t byte) {
+  uint8_t shift = 0x80U;
+  for (int bit = 0; bit < 8; bit++) {
+    uint8_t bit_sum = byte & shift;
+    const uint8_t top_bit = checksum & 0x80U;
+    if (bit_sum != 0U) {
+      bit_sum = 0x1CU;
+      if (top_bit != 0U) {
+        bit_sum = 1U;
+      }
+      checksum = (uint8_t)(checksum << 1);
+      bit_sum ^= (uint8_t)(checksum | 1U);
+    } else {
+      if (top_bit != 0U) {
+        bit_sum = 0x1DU;
+      }
+      checksum = (uint8_t)(checksum << 1);
+      bit_sum ^= checksum;
+    }
+    checksum = bit_sum;
+    shift = (uint8_t)(shift >> 1);
+  }
+  return checksum;
+}
+
+static inline uint8_t chrysler_fca_wheel_button_checksum(
+    const uint8_t buttons,
+    const uint8_t counter_byte) {
+  uint8_t checksum = chrysler_fca_checksum_step(0xFFU, buttons);
+  checksum = chrysler_fca_checksum_step(checksum, counter_byte);
+  return (uint8_t)~checksum;
+}
+
+// CRUISE_BUTTONS (0x23B) is three bytes. Preserve its rolling-counter byte,
+// replace the arbitrated button byte, and always produce one canonical CRC.
+// Both the isolated EPS and ACC legs forward this exact returned payload.
+static inline uint32_t chrysler_long_pack_wheel_button_payload(
+    const uint32_t original_rdlr,
+    const uint8_t arbitrated_buttons) {
+  const uint8_t counter_byte = (uint8_t)(original_rdlr >> 8);
+  const uint8_t checksum = chrysler_fca_wheel_button_checksum(
+    arbitrated_buttons, counter_byte);
+  return (original_rdlr & 0xFF000000U) |
+         (uint32_t)arbitrated_buttons |
+         ((uint32_t)counter_byte << 8) |
+         ((uint32_t)checksum << 16);
+}
+
+// Factory ownership must preserve the physical SCCM payload byte-for-byte,
+// including FCA's native stale-release CRC convention. Rebuild only when the
+// arbiter actually changes a button or while Cancel/openpilot ownership makes
+// filtering authoritative. The resulting one payload is sent to both ACC and
+// EPS so the two modules never observe different 0x23B variants.
+static inline bool chrysler_long_wheel_button_requires_rebuild(
+    const uint8_t original_buttons,
+    const uint8_t arbitrated_buttons,
+    const uint8_t owner_state) {
+  const bool filtered_owner =
+    (owner_state == CHRYSLER_LONG_OWNER_CANCELING) ||
+    (owner_state == CHRYSLER_LONG_OWNER_OPENPILOT);
+  return filtered_owner || (arbitrated_buttons != original_buttons);
+}
+
+// The bridge runs before the generic Panda RX hook, so it must not turn an
+// invalid physical 0x23B into a checksum-valid command while filtering is
+// authoritative. Factory ownership remains a transparent bridge: native FCA
+// traffic, including its measured stale-release encoding, reaches both legs
+// byte-for-byte. Factory stop/go mutations are separately gated on a valid
+// physical checksum before this decision is reached.
+static inline bool chrysler_long_wheel_button_frame_allowed(
+    const uint8_t owner_state,
+    const bool checksum_valid) {
+  const bool filtered_owner =
+    (owner_state == CHRYSLER_LONG_OWNER_CANCELING) ||
+    (owner_state == CHRYSLER_LONG_OWNER_OPENPILOT);
+  return !filtered_owner || checksum_valid;
+}
+
+static inline uint32_t chrysler_long_arbitrate_wheel_button_payload(
+    const uint32_t original_rdlr,
+    const uint8_t original_buttons,
+    const uint8_t arbitrated_buttons,
+    const uint8_t owner_state) {
+  if (chrysler_long_wheel_button_requires_rebuild(
+      original_buttons, arbitrated_buttons, owner_state)) {
+    return chrysler_long_pack_wheel_button_payload(
+      original_rdlr, arbitrated_buttons);
+  }
+  return original_rdlr;
+}
+
 // While canceling, request a normal ACC Cancel from the isolated factory ACC
 // source. During openpilot ownership, prevent Set/Resume and speed-adjust
 // buttons from silently reactivating the factory controller. Main and distance
