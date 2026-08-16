@@ -27,6 +27,11 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.longitudinal_gas_release_recovery import (
+  JEEP_GAS_RELEASE_PLAN_MAX_AGE_S,
+  JEEP_WP_S20_FLAG,
+  jeep_gas_release_context_allowed,
+)
 from openpilot.selfdrive.controls.lib.vehicle_model import VehicleModel
 from openpilot.selfdrive.modeld.model_capabilities import ModelCapabilities
 from openpilot.selfdrive.sunnypilot import get_model_generation
@@ -643,6 +648,7 @@ class Controls:
 
     lat_plan = self.sm['lateralPlanDEPRECATED']
     long_plan = self.sm['longitudinalPlan']
+    long_plan_sp = self.sm['longitudinalPlanSP']
     model_v2 = self.sm['modelV2']
     blinker_svs = lat_plan if self.model_use_lateral_planner else model_v2.meta
 
@@ -678,9 +684,79 @@ class Controls:
 
     if not self.joystick_mode:
       # accel PID loop
-      pid_accel_limits = self.CI.get_pid_accel_limits(self.CP, CS.vEgo, self.v_cruise_helper.v_cruise_kph * CV.KPH_TO_MS)
+      v_cruise_mps = (
+        self.v_cruise_helper.v_cruise_kph * CV.KPH_TO_MS
+      )
+      pid_accel_limits = self.CI.get_pid_accel_limits(
+        self.CP,
+        CS.vEgo,
+        v_cruise_mps,
+      )
       t_since_plan = (self.sm.frame - self.sm.recv_frame['longitudinalPlan']) * DT_CTRL
-      actuators.accel = self.LoC.update(CC.longActive, CS, long_plan, pid_accel_limits, t_since_plan)
+      sp_plan_age = (
+        self.sm.frame - self.sm.recv_frame['longitudinalPlanSP']
+      ) * DT_CTRL
+      recovery_plans_valid = bool(
+        self.sm.all_checks([
+          'longitudinalPlan',
+          'longitudinalPlanSP',
+          'radarState',
+          'modelV2',
+        ])
+        and 0.0 <= t_since_plan <= JEEP_GAS_RELEASE_PLAN_MAX_AGE_S
+        and 0.0 <= sp_plan_age <= JEEP_GAS_RELEASE_PLAN_MAX_AGE_S
+      )
+      force_decel = bool(
+        self.sm['driverMonitoringState'].awarenessStatus < 0.0
+        or self.state == State.softDisabling
+      )
+      radar_state = self.sm['radarState']
+      jeep_op_long = bool(
+        self.CP.carName == 'chrysler'
+        and self.CP.openpilotLongitudinalControl
+        and (self.CP.spFlags & JEEP_WP_S20_FLAG)
+      )
+      recovery_allowed = jeep_gas_release_context_allowed(
+        jeep_op_long=jeep_op_long,
+        plans_valid=recovery_plans_valid,
+        main_source=str(long_plan.longitudinalPlanSource),
+        sp_source=str(long_plan_sp.longitudinalPlanSource),
+        has_lead=bool(
+          long_plan.hasLead
+          or radar_state.leadOne.status
+          or radar_state.leadTwo.status
+        ),
+        fcw=bool(long_plan.fcw),
+        vision_turn_state=str(
+          long_plan_sp.visionTurnControllerState,
+        ),
+        speed_limit_state=str(
+          long_plan_sp.speedLimitControlState,
+        ),
+        turn_speed_state=str(long_plan_sp.turnSpeedControlState),
+        hard_brake_predicted=bool(model_v2.meta.hardBrakePredicted),
+        force_decel=force_decel,
+        brake_pressed=bool(CS.brakePressed),
+        acc_faulted=bool(CS.accFaulted),
+        stock_aeb=bool(CS.stockAeb),
+        standstill=bool(CS.standstill),
+      )
+      recovery_allowed = bool(
+        recovery_allowed
+        and CC.longActive
+        and self.state == State.enabled
+        and self.v_cruise_helper.v_cruise_kph < 250.0
+        and not CS.buttonEvents
+      )
+      actuators.accel = self.LoC.update(
+        CC.longActive,
+        CS,
+        long_plan,
+        pid_accel_limits,
+        t_since_plan,
+        jeep_gas_release_recovery_allowed=recovery_allowed,
+        v_cruise=v_cruise_mps,
+      )
 
       # Steering PID loop and lateral MPC
       if self.model_use_lateral_planner:

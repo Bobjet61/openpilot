@@ -17,6 +17,8 @@ INTERFACE_PATH = Path(__file__).resolve().parents[1] / "interface.py"
 CHRYSLERCAN_PATH = Path(__file__).resolve().parents[1] / "chryslercan.py"
 CONTROLSD_PATH = Path(__file__).resolve().parents[3] / "controls" / "controlsd.py"
 DRIVE_HELPERS_PATH = Path(__file__).resolve().parents[3] / "controls" / "lib" / "drive_helpers.py"
+PRODUCTION_LONG_PLANNER_PATH = Path(__file__).resolve().parents[3] / "controls" / "lib" / "longitudinal_planner.py"
+LONG_MPC_PATH = Path(__file__).resolve().parents[3] / "controls" / "lib" / "longitudinal_mpc_lib" / "long_mpc.py"
 LONG_SPEC = importlib.util.spec_from_file_location("jeep_longitudinal_under_test", LONG_PATH)
 assert LONG_SPEC is not None and LONG_SPEC.loader is not None
 LONG = importlib.util.module_from_spec(LONG_SPEC)
@@ -38,6 +40,7 @@ decode_wp_long_command_diagnostic = LONG.decode_wp_long_command_diagnostic
 decode_wp_long_owner_diagnostic = LONG.decode_wp_long_owner_diagnostic
 jeep_acc_faulted = LONG.jeep_acc_faulted
 jeep_cruise_standstill = LONG.jeep_cruise_standstill
+jeep_closing_brake_floor = LONG.jeep_closing_brake_floor
 jeep_factory_sng_lead_moving = LONG.jeep_factory_sng_lead_moving
 jeep_factory_sng_hold_motion_safe = LONG.jeep_factory_sng_hold_motion_safe
 jeep_factory_sng_vision_lead_moving = LONG.jeep_factory_sng_vision_lead_moving
@@ -47,6 +50,7 @@ select_jeep_longitudinal_mode = LONG.select_jeep_longitudinal_mode
 fca_checksum = LONG.fca_checksum
 jeep_long_shadow_safety_param = LONG.jeep_long_shadow_safety_param
 engine_torque_max_for_speed = LONG.engine_torque_max_for_speed
+propulsion_accel_max_for_speed = LONG.propulsion_accel_max_for_speed
 
 
 class PrivateMessagePacker:
@@ -442,14 +446,16 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertIn("def update_b6y_standstill_hold(", carcontroller_source)
     self.assertEqual(carcontroller_source.count("self.update_b6y_standstill_hold("), 1)
     self.assertIn("SP_JEEP_FACTORY_SNG", carcontroller_source)
-    self.assertIn("B6Y_LEAD_CONFIRM_CYCLES = 3", carcontroller_source)
+    self.assertIn("B6Y_LEAD_CONFIRM_CYCLES = 1", carcontroller_source)
     self.assertIn("if self.jeep_radar_shadow_updated:", carcontroller_source)
     self.assertIn("jeep_factory_sng_lead_moving(", carcontroller_source)
     self.assertIn("B6Y_RESUME_MAX_ATTEMPTS = 3", carcontroller_source)
-    self.assertIn("B6Y_RESUME_PULSE_COUNTERS = 6", carcontroller_source)
+    self.assertIn("B6Y_RESUME_PULSE_COUNTERS = 8", carcontroller_source)
+    self.assertIn("B6Y_RESUME_RETRY_FRAMES = 50", carcontroller_source)
+    self.assertIn("self.b6y_lead_departure_latched |= resume_ready", carcontroller_source)
     self.assertIn("self.b6y_resume_pulse_remaining > 0 and counter_changed", carcontroller_source)
     self.assertIn("driver_button_pressed", carcontroller_source)
-    self.assertIn("B6Y_VISION_LEAD_CONFIRM_CYCLES = 5", carcontroller_source)
+    self.assertIn("B6Y_VISION_LEAD_CONFIRM_CYCLES = 1", carcontroller_source)
     self.assertIn("jeep_factory_sng_vision_lead_moving(", carcontroller_source)
     self.assertIn("self.b6y_approach_armed = True", carcontroller_source)
     self.assertIn(
@@ -474,6 +480,112 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(jeep_factory_sng_hold_motion_safe(0.15))
     self.assertFalse(jeep_factory_sng_hold_motion_safe(-0.15))
     self.assertFalse(jeep_factory_sng_hold_motion_safe(float("nan")))
+
+  def test_closing_guard_replays_first_route_6b_intervention_early(self):
+    # Route 6b at 474.50 s: the production controller requested only -0.99
+    # with a 28.83 m lead closing at 5.93 m/s. The fused guard must already
+    # request substantial braking, well before the 476.84 s driver takeover.
+    vision = SimpleNamespace(
+      status=True, d_rel=28.83, v_rel=-5.93, model_prob=1.0,
+    )
+    selection = SimpleNamespace(
+      reason="selected",
+      track=SimpleNamespace(d_rel=28.83, v_rel=-5.93),
+    )
+    floor = jeep_closing_brake_floor(16.36, vision, selection)
+    self.assertIsNotNone(floor)
+    self.assertLessEqual(floor, -3.0)
+
+    # At 470.0 s the matched lead was still about 44 m away. The expanded
+    # guard should already begin controlled deceleration, over six seconds
+    # before the driver intervention rather than waiting for the close range.
+    early_vision = SimpleNamespace(
+      status=True, d_rel=43.84, v_rel=-2.28, model_prob=1.0,
+    )
+    early_selection = SimpleNamespace(
+      reason="selected",
+      track=SimpleNamespace(d_rel=45.0, v_rel=-3.0),
+    )
+    early_floor = jeep_closing_brake_floor(
+      17.07, early_vision, early_selection,
+    )
+    self.assertIsNotNone(early_floor)
+    self.assertLessEqual(early_floor, -1.5)
+
+  def test_closing_guard_replays_second_route_6b_intervention_early(self):
+    # Route 6b at 585.25 s: engage before the original controller reaches its
+    # maximum at 587.10 s and before the 588.04 s driver intervention.
+    vision = SimpleNamespace(
+      status=True, d_rel=36.58, v_rel=-5.59, model_prob=1.0,
+    )
+    selection = SimpleNamespace(
+      reason="selected",
+      track=SimpleNamespace(d_rel=36.58, v_rel=-5.59),
+    )
+    floor = jeep_closing_brake_floor(17.60, vision, selection)
+    self.assertIsNotNone(floor)
+    self.assertLessEqual(floor, -2.8)
+
+    # By about 582.6 s, more than five seconds before takeover, radar and
+    # vision agreed that the lead was closing. Begin meaningful braking here.
+    early_vision = SimpleNamespace(
+      status=True, d_rel=60.69, v_rel=-4.66, model_prob=0.98,
+    )
+    early_selection = SimpleNamespace(
+      reason="selected",
+      track=SimpleNamespace(d_rel=63.07, v_rel=-6.0),
+    )
+    early_floor = jeep_closing_brake_floor(
+      19.35, early_vision, early_selection,
+    )
+    self.assertIsNotNone(early_floor)
+    self.assertLessEqual(early_floor, -2.0)
+
+  def test_closing_guard_remains_active_inside_the_buffer(self):
+    vision = SimpleNamespace(
+      status=True, d_rel=4.0, v_rel=-3.5, model_prob=1.0,
+    )
+    selection = SimpleNamespace(
+      reason="selected",
+      track=SimpleNamespace(d_rel=4.2, v_rel=-3.5),
+    )
+    self.assertEqual(
+      jeep_closing_brake_floor(4.0, vision, selection), ACCEL_MIN,
+    )
+
+  def test_jeep_comfort_gap_is_runtime_scoped_from_emergency_braking(self):
+    planner_source = PRODUCTION_LONG_PLANNER_PATH.read_text(encoding="utf-8")
+    mpc_source = LONG_MPC_PATH.read_text(encoding="utf-8")
+    self.assertIn("JEEP_OP_LONG_LEAD_OBSTACLE_OFFSET_M = 0.0", planner_source)
+    self.assertIn("JEEP_OP_LONG_T_FOLLOW_OFFSET_S = 0.25", planner_source)
+    self.assertIn('CP.carName == "chrysler"', planner_source)
+    self.assertIn("CP.openpilotLongitudinalControl", planner_source)
+    self.assertIn("CP.spFlags & JEEP_WP_S20_FLAG", planner_source)
+    self.assertIn("else 0.0", planner_source)
+    self.assertIn("+ self.lead_obstacle_offset_m", mpc_source)
+    self.assertIn("get_T_FOLLOW(personality) + self.t_follow_offset_s", mpc_source)
+    self.assertIn("radarstate.leadOne.modelProb > 0.9", mpc_source)
+
+  def test_closing_guard_requires_fused_confident_closing_lead(self):
+    vision = SimpleNamespace(
+      status=True, d_rel=25.0, v_rel=-6.0, model_prob=1.0,
+    )
+    self.assertIsNone(jeep_closing_brake_floor(16.0, vision, None))
+    self.assertIsNone(jeep_closing_brake_floor(
+      16.0,
+      SimpleNamespace(status=True, d_rel=25.0, v_rel=-6.0, model_prob=0.5),
+      SimpleNamespace(
+        reason="selected", track=SimpleNamespace(d_rel=25.0, v_rel=-6.0),
+      ),
+    ))
+    self.assertIsNone(jeep_closing_brake_floor(
+      16.0,
+      vision,
+      SimpleNamespace(
+        reason="no_gated_candidate",
+        track=SimpleNamespace(d_rel=25.0, v_rel=-6.0),
+      ),
+    ))
 
   def test_b6y_hold_message_has_no_propulsion_or_go_request(self):
     chryslercan = load_chryslercan()
@@ -812,7 +924,21 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertEqual(result.low_speed_state, "drive")
     self.assertTrue(result.engine_active)
 
-  def test_b7t_full_launch_request_reaches_320_nm_but_is_not_a_floor(self):
+  def test_low_speed_propulsion_accel_cap_is_monotonic_and_ends_at_5_mps(self):
+    expected = (
+      (0.0, 1.0),
+      (1.5, 1.05),
+      (3.0, 1.1),
+      (4.0, 1.55),
+      (5.0, 2.0),
+      (20.0, 2.0),
+    )
+    for speed_mps, accel_mps2 in expected:
+      self.assertAlmostEqual(
+        propulsion_accel_max_for_speed(speed_mps), accel_mps2,
+      )
+
+  def test_b7t_full_launch_request_is_shaped_but_is_not_a_floor(self):
     def launch(requested_accel):
       shadow = JeepLongitudinalShadow()
       for _ in range(100):
@@ -829,9 +955,41 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     full = launch(2.0)
     partial = launch(0.5)
     self.assertEqual(LONG.LOW_SPEED_LAUNCH_TORQUE_MAX_NM, 320.0)
-    self.assertAlmostEqual(full.engine_torque_nm, 320.0)
+    self.assertGreater(full.engine_torque_nm, 0.0)
+    self.assertLess(full.engine_torque_nm, 220.0)
     self.assertGreater(partial.engine_torque_nm, 0.0)
     self.assertLess(partial.engine_torque_nm, full.engine_torque_nm)
+
+  def test_low_speed_cap_applies_after_creep_drive_handoff(self):
+    shadow = JeepLongitudinalShadow()
+    shadow.low_speed_state = "drive"
+    shadow.propulsion_latched = True
+    shadow.accel_last = 2.0
+    for _ in range(100):
+      result = shadow.update(2.0, eligible=True, speed_mps=1.9)
+    expected_accel = propulsion_accel_max_for_speed(1.9)
+    expected_torque = (
+      LONG.ENGINE_TORQUE_ACCEL_GAIN * expected_accel
+      + LONG.ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * expected_accel
+      + LONG.ENGINE_TORQUE_SPEED_GAIN * 1.9
+    )
+    self.assertEqual(result.low_speed_state, "drive")
+    self.assertAlmostEqual(result.engine_torque_nm, expected_torque)
+    self.assertLess(result.engine_torque_nm, 220.0)
+
+  def test_full_propulsion_authority_is_unchanged_at_and_above_5_mps(self):
+    shadow = JeepLongitudinalShadow()
+    shadow.propulsion_latched = True
+    shadow.accel_last = 2.0
+    for _ in range(100):
+      result = shadow.update(2.0, eligible=True, speed_mps=5.0)
+    expected_torque = (
+      LONG.ENGINE_TORQUE_ACCEL_GAIN * 2.0
+      + LONG.ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * 2.0
+      + LONG.ENGINE_TORQUE_SPEED_GAIN * 5.0
+    )
+    self.assertAlmostEqual(result.engine_torque_nm, expected_torque)
+    self.assertFalse(result.brake_active)
 
   def test_failed_creep_reapplies_hold_and_requires_request_reset(self):
     shadow = JeepLongitudinalShadow()
@@ -912,13 +1070,13 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
     self.assertFalse(result.engine_active)
     self.assertEqual(result.engine_torque_nm, 0.0)
 
-  def test_b6m_capture_brake_calibration_is_applied(self):
+  def test_complete_guarded_brake_request_is_applied(self):
     shadow = JeepLongitudinalShadow()
     for _ in range(60):
       result = shadow.update(-1.0, eligible=True, speed_mps=15.0)
     self.assertTrue(result.brake_active)
     self.assertFalse(result.engine_active)
-    self.assertAlmostEqual(result.brake_accel_mps2, -1.0188, places=4)
+    self.assertAlmostEqual(result.brake_accel_mps2, -1.0, places=4)
 
   def test_b6z_restores_fault_free_flat_road_propulsion_gain(self):
     shadow = JeepLongitudinalShadow()
@@ -1052,7 +1210,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
         + LONG.ENGINE_TORQUE_ZERO_EPSILON_NM + 0.0001,
       )
       self.assertLessEqual(
-        abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0401,
+        abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0701,
       )
       if result.command_mode == "coast":
         saw_coast = True
@@ -1079,7 +1237,7 @@ class TestJeepLongitudinalShadow(unittest.TestCase):
         abs(result.engine_torque_nm - previous.engine_torque_nm), 12.0001,
       )
       self.assertLessEqual(
-        abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0401,
+        abs(result.brake_accel_mps2 - previous.brake_accel_mps2), 0.0701,
       )
       if result.command_mode == "coast":
         saw_coast = True

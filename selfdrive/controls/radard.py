@@ -10,6 +10,12 @@ from openpilot.common.numpy_fast import interp
 from openpilot.common.params import Params
 from openpilot.common.realtime import DT_CTRL, Ratekeeper, Priority, config_realtime_process
 from openpilot.common.swaglog import cloudlog
+from openpilot.selfdrive.car.chrysler.jeep_vision_lead_decel import (
+  JeepVisionLeadDecelEstimator,
+  VISION_LEAD_ACCEL_TAU,
+  jeep_vision_lead_decel_runtime_eligible,
+)
+from openpilot.selfdrive.car.chrysler.values import CAR as CHRYSLER_CAR, ChryslerFlagsSP
 from openpilot.selfdrive.car.hyundai.values import HyundaiFlagsSP
 
 from openpilot.common.simple_kalman import KF1D
@@ -150,7 +156,8 @@ def match_vision_to_track(v_ego: float, lead: capnp._DynamicStructReader, tracks
     return None
 
 
-def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: float, model_v_ego: float):
+def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: float, model_v_ego: float,
+                               a_lead_k: float = 0.0, a_lead_tau: float = VISION_LEAD_ACCEL_TAU):
   lead_v_rel_pred = lead_msg.v[0] - model_v_ego
   return {
     "dRel": float(lead_msg.x[0] - RADAR_TO_CAMERA),
@@ -158,8 +165,8 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
     "vRel": float(lead_v_rel_pred),
     "vLead": float(v_ego + lead_v_rel_pred),
     "vLeadK": float(v_ego + lead_v_rel_pred),
-    "aLeadK": 0.0,
-    "aLeadTau": 0.3,
+    "aLeadK": min(0.0, float(a_lead_k)),
+    "aLeadTau": float(a_lead_tau),
     "fcw": False,
     "modelProb": float(lead_msg.prob),
     "status": True,
@@ -169,7 +176,9 @@ def get_RadarState_from_vision(lead_msg: capnp._DynamicStructReader, v_ego: floa
 
 
 def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capnp._DynamicStructReader,
-             model_v_ego: float, CP: car.CarParams, low_speed_override: bool = True) -> dict[str, Any]:
+             model_v_ego: float, CP: car.CarParams, low_speed_override: bool = True,
+             vision_decel_estimator: JeepVisionLeadDecelEstimator | None = None,
+             model_mono_time_ns: int = 0) -> dict[str, Any]:
   # Determine leads, this is where the essential logic happens
   if len(tracks) > 0 and ready and lead_msg.prob > .5:
     track = match_vision_to_track(v_ego, lead_msg, tracks)
@@ -178,9 +187,26 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
 
   lead_dict = {'status': False}
   if track is not None:
+    if vision_decel_estimator is not None:
+      vision_decel_estimator.reset(model_mono_time_ns, "radar_track")
     lead_dict = track.get_RadarState(CP, lead_msg.y[0], lead_msg.prob)
   elif (track is None) and ready and (lead_msg.prob > .5):
-    lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego)
+    a_lead_k = 0.0
+    if vision_decel_estimator is not None:
+      estimate = vision_decel_estimator.update(
+        model_mono_time_ns=model_mono_time_ns,
+        v_ego_mps=v_ego,
+        model_v_ego_mps=model_v_ego,
+        probability=lead_msg.prob,
+        x=lead_msg.x,
+        v=lead_msg.v,
+        a=lead_msg.a,
+        a_std=lead_msg.aStd,
+      )
+      a_lead_k = estimate.a_lead_mps2
+    lead_dict = get_RadarState_from_vision(lead_msg, v_ego, model_v_ego, a_lead_k)
+  elif vision_decel_estimator is not None:
+    vision_decel_estimator.reset(model_mono_time_ns, "vision_lead_unavailable")
 
   if low_speed_override:
     low_speed_tracks = [c for c in tracks.values() if c.potential_low_speed_lead(v_ego)]
@@ -189,6 +215,8 @@ def get_lead(v_ego: float, ready: bool, tracks: dict[int, Track], lead_msg: capn
 
       # Only choose new track if it is actually closer than the previous one
       if (not lead_dict['status']) or (closest_track.dRel < lead_dict['dRel']):
+        if vision_decel_estimator is not None:
+          vision_decel_estimator.reset(model_mono_time_ns, "low_speed_radar_track")
         lead_dict = closest_track.get_RadarState()
 
   return lead_dict
@@ -211,6 +239,17 @@ class RadarD:
     self.ready = False
 
     self.CP = CP
+    jeep_wp_op_long = bool(
+      CP.carFingerprint in (
+        CHRYSLER_CAR.JEEP_GRAND_CHEROKEE,
+        CHRYSLER_CAR.JEEP_GRAND_CHEROKEE_2019,
+      )
+      and CP.openpilotLongitudinalControl
+      and CP.spFlags & ChryslerFlagsSP.SP_WP_S20
+    )
+    self.jeep_vision_lead_decel_estimator = (
+      JeepVisionLeadDecelEstimator() if jeep_wp_op_long else None
+    )
 
   def update(self, sm: messaging.SubMaster, rr):
     self.ready = sm.seen['modelV2']
@@ -261,7 +300,36 @@ class RadarD:
       model_v_ego = self.v_ego
     leads_v3 = sm['modelV2'].leadsV3
     if len(leads_v3) > 1:
-      self.radar_state.leadOne = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[0], model_v_ego, self.CP, low_speed_override=True)
+      model_age_ns = max(sm.logMonoTime.values()) - sm.logMonoTime['modelV2']
+      jeep_vision_decel_eligible = jeep_vision_lead_decel_runtime_eligible(
+        scoped_to_jeep_wp_op_long=self.jeep_vision_lead_decel_estimator is not None,
+        inputs_valid=sm.all_checks(['modelV2', 'carState']),
+        model_age_ns=model_age_ns,
+        cruise_enabled=sm['carState'].cruiseState.enabled,
+        forward_gear=sm['carState'].gearShifter == car.CarState.GearShifter.drive,
+        brake_pressed=sm['carState'].brakePressed,
+        stock_aeb=sm['carState'].stockAeb,
+        acc_faulted=sm['carState'].accFaulted,
+      )
+      jeep_vision_decel_estimator = (
+        self.jeep_vision_lead_decel_estimator if jeep_vision_decel_eligible else None
+      )
+      if self.jeep_vision_lead_decel_estimator is not None and not jeep_vision_decel_eligible:
+        self.jeep_vision_lead_decel_estimator.reset(
+          sm.logMonoTime['modelV2'],
+          "longitudinal_ineligible",
+        )
+      self.radar_state.leadOne = get_lead(
+        self.v_ego,
+        self.ready,
+        self.tracks,
+        leads_v3[0],
+        model_v_ego,
+        self.CP,
+        low_speed_override=True,
+        vision_decel_estimator=jeep_vision_decel_estimator,
+        model_mono_time_ns=sm.logMonoTime['modelV2'],
+      )
       self.radar_state.leadTwo = get_lead(self.v_ego, self.ready, self.tracks, leads_v3[1], model_v_ego, self.CP, low_speed_override=False)
 
   def publish(self, pm: messaging.PubMaster, lag_ms: float):

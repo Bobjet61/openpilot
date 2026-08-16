@@ -2,6 +2,11 @@ from cereal import car
 from openpilot.common.numpy_fast import clip, interp
 from openpilot.common.realtime import DT_CTRL
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
+from openpilot.selfdrive.controls.lib.longitudinal_gas_release_recovery import (
+  JEEP_WP_S20_FLAG,
+  JeepGasReleaseRecovery,
+  attenuate_negative_pid_output,
+)
 from openpilot.selfdrive.controls.lib.pid import PIDController
 from openpilot.selfdrive.modeld.constants import ModelConstants
 
@@ -61,13 +66,34 @@ class LongControl:
                              k_f=CP.longitudinalTuning.kf, rate=1 / DT_CTRL)
     self.v_pid = 0.0
     self.last_output_accel = 0.0
+    jeep_wp_op_long = bool(
+      CP.carName == "chrysler"
+      and CP.openpilotLongitudinalControl
+      and (CP.spFlags & JEEP_WP_S20_FLAG)
+    )
+    self.jeep_gas_release_recovery = JeepGasReleaseRecovery(
+      jeep_wp_op_long,
+    )
+    self.jeep_gas_release_feedback_scale = 1.0
+    self.jeep_gas_release_baseline_output_accel = 0.0
+    self.jeep_gas_release_planned_accel = 0.0
 
   def reset(self, v_pid):
     """Reset PID controller and change setpoint"""
     self.pid.reset()
     self.v_pid = v_pid
 
-  def update(self, active, CS, long_plan, accel_limits, t_since_plan):
+  def update(
+      self,
+      active,
+      CS,
+      long_plan,
+      accel_limits,
+      t_since_plan,
+      *,
+      jeep_gas_release_recovery_allowed=False,
+      v_cruise=float("nan"),
+  ):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -93,8 +119,28 @@ class LongControl:
 
     self.pid.neg_limit = accel_limits[0]
     self.pid.pos_limit = accel_limits[1]
+    self.jeep_gas_release_planned_accel = a_target
 
-    output_accel = self.last_output_accel
+    recovery_was_active = self.jeep_gas_release_recovery.active
+    self.jeep_gas_release_feedback_scale = (
+      self.jeep_gas_release_recovery.update(
+        active=active,
+        gas_pressed=CS.gasPressed,
+        context_allowed=jeep_gas_release_recovery_allowed,
+        v_ego=CS.vEgo,
+        v_cruise=v_cruise,
+        planned_accel=a_target,
+        dt_s=DT_CTRL,
+      )
+    )
+    recovery_cancelled = bool(
+      recovery_was_active and not self.jeep_gas_release_recovery.active
+    )
+
+    output_accel = (
+      self.jeep_gas_release_baseline_output_accel
+      if recovery_cancelled else self.last_output_accel
+    )
     self.long_control_state = long_control_state_trans(self.CP, active, self.long_control_state, CS.vEgo,
                                                        v_target, v_target_1sec, CS.brakePressed,
                                                        CS.cruiseState.standstill)
@@ -121,13 +167,27 @@ class LongControl:
       # TODO too complex, needs to be simplified and tested on toyotas
       prevent_overshoot = not self.CP.stoppingControl and CS.vEgo < 1.5 and v_target_1sec < 0.7 and v_target_1sec < self.v_pid
       deadzone = interp(CS.vEgo, self.CP.longitudinalTuning.deadzoneBP, self.CP.longitudinalTuning.deadzoneV)
-      freeze_integrator = prevent_overshoot
-
       error = self.v_pid - CS.vEgo
       error_deadzone = apply_deadzone(error, deadzone)
+      freeze_integrator = prevent_overshoot
       output_accel = self.pid.update(error_deadzone, speed=CS.vEgo,
                                      feedforward=a_target,
                                      freeze_integrator=freeze_integrator)
+      self.jeep_gas_release_baseline_output_accel = output_accel
+      if self.jeep_gas_release_recovery.active:
+        output_accel = attenuate_negative_pid_output(
+          feedforward=self.pid.f,
+          proportional=self.pid.p,
+          integral=self.pid.i,
+          derivative=self.pid.d,
+          ordinary_output=self.jeep_gas_release_baseline_output_accel,
+          feedback_scale=self.jeep_gas_release_feedback_scale,
+          neg_limit=accel_limits[0],
+          pos_limit=accel_limits[1],
+        )
+
+    if self.long_control_state != LongCtrlState.pid:
+      self.jeep_gas_release_baseline_output_accel = output_accel
 
     self.last_output_accel = clip(output_accel, accel_limits[0], accel_limits[1])
 

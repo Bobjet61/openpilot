@@ -225,9 +225,16 @@ def gen_long_ocp():
 
 
 class LongitudinalMpc:
-  def __init__(self, mode='acc', dt=DT_MDL):
+  def __init__(self, mode='acc', dt=DT_MDL, lead_obstacle_offset_m=0.0,
+               t_follow_offset_s=0.0):
     self.mode = mode
     self.dt = dt
+    # A positive offset moves only a real lead's comfort target closer. FCW
+    # continues to use the unmodified measured lead trajectory below, and
+    # platform-specific emergency guards remain independent of this comfort
+    # target. Zero preserves upstream behavior for every other platform.
+    self.lead_obstacle_offset_m = max(0.0, float(lead_obstacle_offset_m))
+    self.t_follow_offset_s = max(0.0, float(t_follow_offset_s))
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = SOURCES[2]
@@ -339,7 +346,7 @@ class LongitudinalMpc:
     self.max_a = max_a
 
   def update(self, radarstate, v_cruise, x, v, a, j, personality=custom.LongitudinalPersonalitySP.standard):
-    t_follow = get_T_FOLLOW(personality)
+    t_follow = get_T_FOLLOW(personality) + self.t_follow_offset_s
     v_ego = self.x0[1]
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
@@ -349,8 +356,14 @@ class LongitudinalMpc:
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+    lead_0_obstacle = (
+      lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
+      + self.lead_obstacle_offset_m
+    )
+    lead_1_obstacle = (
+      lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+      + self.lead_obstacle_offset_m
+    )
 
     cruise_target_e2ex = T_IDXS * np.clip(v_cruise, v_ego - 2.0, 1e3) + x[0]
     e2e_xforward = ((v[1:] + v[:-1]) / 2) * (T_IDXS[1:] - T_IDXS[:-1])

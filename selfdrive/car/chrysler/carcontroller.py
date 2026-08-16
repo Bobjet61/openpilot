@@ -19,6 +19,7 @@ from openpilot.selfdrive.car.chrysler.jeep_longitudinal import (
   jeep_factory_sng_vision_lead_moving,
 )
 from openpilot.selfdrive.car.chrysler.jeep_longitudinal_planner_shadow import JeepLongitudinalPlanShadow
+from openpilot.selfdrive.car.chrysler.jeep_radar_brake_guard import JeepRadarBrakeContinuityGuard
 from openpilot.selfdrive.car.chrysler.jeep_steering_discontinuity_guard import JeepSteeringDiscontinuityGuard
 from openpilot.selfdrive.car.chrysler.jeep_steering_shadow import JeepSteeringRateCandidateShadow, JeepSteeringShadow
 from openpilot.selfdrive.car.chrysler.values import CAR, RAM_CARS, RAM_DT, STEER_THRESHOLD, CarControllerParams, ChryslerFlags, ChryslerFlagsSP
@@ -33,11 +34,15 @@ JEEP_LONG_CARS = {
 }
 
 B6Y_STANDSTILL_HOLD_DECEL = -2.0
-B6Y_LEAD_CONFIRM_CYCLES = 3
-B6Y_VISION_LEAD_CONFIRM_CYCLES = 5
-B6Y_RESUME_RETRY_FRAMES = 150
+# Factory SNG is only a hold/release bridge: once independent lead motion is
+# observed, let the stock ACC resume without adding a perceptible software
+# delay. Both guarded detection paths may trigger on their first fresh
+# observation; transmission follows on the next valid SCCM counter.
+B6Y_LEAD_CONFIRM_CYCLES = 1
+B6Y_VISION_LEAD_CONFIRM_CYCLES = 1
+B6Y_RESUME_RETRY_FRAMES = 50
 B6Y_RESUME_MAX_ATTEMPTS = 3
-B6Y_RESUME_PULSE_COUNTERS = 6
+B6Y_RESUME_PULSE_COUNTERS = 8
 JEEP_LKAS_ENABLE_CONFIRM_FRAMES = 50
 
 
@@ -61,6 +66,7 @@ class CarController(CarControllerBase):
     self.jeep_radar_shadow_updated = False
     self.b6y_resume_attempts = 0
     self.b6y_resume_pulse_remaining = 0
+    self.b6y_lead_departure_latched = False
     self.jeep_long_shadow = JeepLongitudinalShadow()
     self.jeep_long_envelope = self.jeep_long_shadow.update(0.0, eligible=False)
     self.jeep_long_shadow_frames = []
@@ -80,9 +86,16 @@ class CarController(CarControllerBase):
       if CP.carFingerprint in JEEP_LONG_CARS else None
     )
     self.jeep_radar_shadow_last_cycle = 0
+    self.jeep_radar_shadow_update_frame = -1000
     self.jeep_radar_shadow_selection = None
     self.jeep_radar_shadow_vision = None
     self.jeep_radar_shadow_reason_counts = Counter()
+    self.jeep_closing_brake_floor = None
+    self.jeep_radar_brake_guard = (
+      JeepRadarBrakeContinuityGuard()
+      if CP.carFingerprint in JEEP_LONG_CARS else None
+    )
+    self.jeep_radar_brake_guard_result = None
     self.jeep_steering_model_sm = (
       messaging.SubMaster(["modelV2"])
       if CP.carFingerprint in JEEP_LONG_CARS else None
@@ -185,6 +198,21 @@ class CarController(CarControllerBase):
     jeep_long_vehicle_eligible, jeep_long_vehicle_reason = (
       self.jeep_long_vehicle_eligibility(CC, CS)
     )
+    if self.jeep_radar_brake_guard is not None:
+      radar_shadow = CS.jeep_radar_shadow
+      self.jeep_radar_brake_guard_result = (
+        self.jeep_radar_brake_guard.update(
+          eligible=jeep_long_vehicle_eligible,
+          v_ego=CS.out.vEgo,
+          now_nanos=now_nanos,
+          radar_cycle=radar_shadow.cycle_count,
+          cycle_complete=radar_shadow.last_cycle_complete,
+          tracks=radar_shadow.tracks,
+          vision=self.jeep_radar_shadow_vision,
+          selection=self.jeep_radar_shadow_selection,
+          planner_decelerating=CC.actuators.accel <= -0.40,
+        )
+      )
     self.update_jeep_long_plan_shadow(
       CS,
       now_nanos,
@@ -202,6 +230,25 @@ class CarController(CarControllerBase):
           if self.jeep_long_plan_result is not None else 0.0
         )
       )
+      dropout_floor = (
+        self.jeep_radar_brake_guard_result.brake_floor_mps2
+        if self.jeep_radar_brake_guard_result is not None else None
+      )
+      # The former stateless fused-closing floor is deliberately not composed
+      # here. Archive replay showed that brief vision/radar pairing fragments
+      # could turn an ordinary planner request into abrupt braking while the
+      # production lead remained healthy. Only the stateful degraded/low-
+      # confidence lead-continuity guard may strengthen the production request.
+      self.jeep_closing_brake_floor = dropout_floor
+      if (
+          JEEP_LONG_ACTUATION_COMPILED
+          and self.CP.openpilotLongitudinalControl
+          and self.jeep_closing_brake_floor is not None
+      ):
+        requested_accel = min(
+          requested_accel,
+          self.jeep_closing_brake_floor,
+        )
       # CC.actuators.accel is already the output of openpilot's production
       # longitudinal controller. The separate plan subscriber remains useful
       # for telemetry, but its transient service-valid flag must not reset the
@@ -244,6 +291,10 @@ class CarController(CarControllerBase):
       cloudlog.info(
         f"Jeep long shadow: eligible={self.jeep_long_envelope.eligible}, "
         f"requested={self.jeep_long_envelope.requested_accel:.3f}, "
+        f"closing_floor={self.jeep_closing_brake_floor}, "
+        f"dropout_guard_reason={getattr(self.jeep_radar_brake_guard_result, 'reason', 'unavailable')}, "
+        f"dropout_guard_age={getattr(self.jeep_radar_brake_guard_result, 'dropout_age_s', 0.0):.3f}, "
+        f"dropout_guard_bias={getattr(self.jeep_radar_brake_guard_result, 'range_bias_m', 0.0):.2f}, "
         f"limited={self.jeep_long_envelope.limited_accel:.3f}, "
         f"brake={self.jeep_long_envelope.brake_active}, "
         f"brake_cmd={self.jeep_long_envelope.brake_accel_mps2:.3f}, "
@@ -251,6 +302,10 @@ class CarController(CarControllerBase):
         f"torque={self.jeep_long_envelope.engine_torque_nm:.1f}, "
         f"pitch={self.jeep_long_envelope.filtered_pitch_rad:.4f}, "
         f"grade_torque={self.jeep_long_envelope.grade_torque_nm:.1f}, "
+        f"speed={CS.out.vEgo:.3f}, "
+        f"a_ego={CS.out.aEgo:.3f}, "
+        f"set_speed={CC.hudControl.setSpeed:.3f}, "
+        f"control_state={CC.actuators.longControlState}, "
         f"mode={self.jeep_long_envelope.command_mode}, "
         f"brake_latched={self.jeep_long_envelope.brake_latched}, "
         f"stop={self.jeep_long_envelope.stop_request}, "
@@ -497,6 +552,7 @@ class CarController(CarControllerBase):
       self.b6y_minimum_held_lead_distance = float("inf")
       self.b6y_resume_attempts = 0
       self.b6y_resume_pulse_remaining = 0
+      self.b6y_lead_departure_latched = False
       cloudlog.info(
         "B6Y hold: armed after stock ACC decelerated to standstill"
       )
@@ -515,6 +571,7 @@ class CarController(CarControllerBase):
       self.b6y_approach_armed = False
       self.b6y_resume_attempts = 0
       self.b6y_resume_pulse_remaining = 0
+      self.b6y_lead_departure_latched = False
       cloudlog.info("B6Y hold: released")
       return
 
@@ -561,15 +618,19 @@ class CarController(CarControllerBase):
         if vision_lead_moving else 0
       )
 
-    # A single RESUME frame is followed by the stock SCCM release frame. Retry
-    # at most three times, 1.5 seconds apart, and only while independent vision
-    # and raw-radar observations continue to agree that the lead is moving.
+    # Retry the counter-synchronized RESUME sequence at most three times, 0.5
+    # seconds apart, after independent lead-motion confirmation.
     resume_ready = (
       self.b6y_lead_moving_frames >= B6Y_LEAD_CONFIRM_CYCLES
       or self.b6y_vision_lead_moving_frames >= B6Y_VISION_LEAD_CONFIRM_CYCLES
     )
+    # A departing lead can quickly leave the close-range association after the
+    # first pulse. Keep that independently confirmed departure latched for the
+    # bounded retry sequence; pedals, faults, cancel, gear, and motion gates
+    # above still release the hold immediately.
+    self.b6y_lead_departure_latched |= resume_ready
     retry_ready = self.frame - self.b6y_last_resume_frame >= B6Y_RESUME_RETRY_FRAMES
-    if (resume_ready and retry_ready and
+    if (self.b6y_lead_departure_latched and retry_ready and
         self.b6y_resume_attempts < B6Y_RESUME_MAX_ATTEMPTS and
         self.b6y_resume_pulse_remaining == 0):
       self.b6y_resume_pulse_remaining = B6Y_RESUME_PULSE_COUNTERS
@@ -585,7 +646,7 @@ class CarController(CarControllerBase):
 
     # The Jeep ignored a single 20 ms synthesized RESUME frame in route 5d.
     # A physical press that it recognized occupied seven consecutive SCCM
-    # counters. Emit six fresh, counter-synchronized frames per bounded attempt.
+    # counters. Emit eight fresh, counter-synchronized frames per bounded attempt.
     if (self.b6y_resume_pulse_remaining > 0 and counter_changed and
         not driver_button_pressed):
       can_sends.append(chryslercan.create_cruise_buttons(
@@ -675,6 +736,7 @@ class CarController(CarControllerBase):
     if radar_shadow.cycle_count == self.jeep_radar_shadow_last_cycle:
       return
     self.jeep_radar_shadow_last_cycle = radar_shadow.cycle_count
+    self.jeep_radar_shadow_update_frame = self.frame
     self.jeep_radar_shadow_updated = True
 
     radar_state_valid = (
@@ -728,6 +790,7 @@ class CarController(CarControllerBase):
       f"max_accel={window.max_accel_mps2:.3f},"
       f"last_reason={result.reason},"
       f"source={result.source},"
+      f"has_lead={result.has_lead},"
       f"lead_state={result.lead_state},"
       f"plan_age={result.plan_age_s:.3f},"
       f"target_v={result.target_speed_mps:.3f},"

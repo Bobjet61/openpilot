@@ -46,6 +46,21 @@ FACTORY_SNG_VISION_MIN_DISTANCE_GAIN_M = 0.5
 # independent pedal, fault, collision, freshness, and command-envelope guards.
 FACTORY_SNG_HOLD_CREEP_MAX_MPS = 0.15
 
+# Last-resort closing guard for Jeep openpilot-long. This does not replace the
+# production planner. It may only make its acceleration request more negative
+# when independently associated vision and raw-radar observations agree on a
+# rapidly closing lead inside the normal time gap.
+JEEP_CLOSING_GUARD_MIN_MODEL_PROB = 0.90
+JEEP_CLOSING_GUARD_MIN_SPEED_MPS = 3.0
+JEEP_CLOSING_GUARD_MIN_CLOSING_MPS = 2.0
+# Start outside the normal planner's late response seen in route 6b. A 2.8 s
+# envelope gave roughly 4-6 s of intervention margin in those two approaches,
+# while the required-deceleration calculation still ramps rather than jumping
+# directly to the maximum at the outer boundary.
+JEEP_CLOSING_GUARD_TIME_GAP_S = 3.0
+JEEP_CLOSING_GUARD_STOP_BUFFER_M = 5.4
+JEEP_CLOSING_GUARD_ASSUMED_LEAD_DECEL_MPS2 = 3.0
+
 
 def jeep_factory_sng_hold_motion_safe(v_ego):
   """Permit only near-zero creep while the exact braking-only hold is active."""
@@ -53,6 +68,67 @@ def jeep_factory_sng_hold_motion_safe(v_ego):
     math.isfinite(float(v_ego))
     and abs(float(v_ego)) < FACTORY_SNG_HOLD_CREEP_MAX_MPS
   )
+
+
+def jeep_closing_brake_floor(v_ego, vision, radar_selection):
+  """Return a bounded emergency brake floor for an agreed closing lead.
+
+  The assumed lead stopping distance makes the guard react to a lead that may
+  continue braking, rather than waiting for the instantaneous relative-speed
+  trajectory to become unavoidable. None means the guarded observations are
+  absent or the lead is outside the closing envelope.
+  """
+  track = getattr(radar_selection, "track", None)
+  if (
+      vision is None or track is None
+      or getattr(radar_selection, "reason", None) != "selected"
+      or not bool(getattr(vision, "status", False))
+  ):
+    return None
+
+  values = (
+    v_ego,
+    getattr(vision, "d_rel", float("nan")),
+    getattr(vision, "v_rel", float("nan")),
+    getattr(vision, "model_prob", float("nan")),
+    getattr(track, "d_rel", float("nan")),
+    getattr(track, "v_rel", float("nan")),
+  )
+  if not all(math.isfinite(float(value)) for value in values):
+    return None
+
+  v_ego = float(v_ego)
+  vision_d_rel = float(vision.d_rel)
+  vision_v_rel = float(vision.v_rel)
+  model_prob = float(vision.model_prob)
+  radar_d_rel = float(track.d_rel)
+  radar_v_rel = float(track.v_rel)
+  d_rel = min(vision_d_rel, radar_d_rel)
+  closing_speed = max(0.0, -(vision_v_rel + radar_v_rel) / 2.0)
+  if (
+      model_prob < JEEP_CLOSING_GUARD_MIN_MODEL_PROB
+      or abs(vision_v_rel - radar_v_rel) > 3.0
+      or abs(vision_d_rel - radar_d_rel) > max(5.0, vision_d_rel * 0.20)
+      or v_ego < JEEP_CLOSING_GUARD_MIN_SPEED_MPS
+      or closing_speed < JEEP_CLOSING_GUARD_MIN_CLOSING_MPS
+      or d_rel <= 0.0
+      or d_rel > JEEP_CLOSING_GUARD_STOP_BUFFER_M +
+          JEEP_CLOSING_GUARD_TIME_GAP_S * v_ego
+  ):
+    return None
+
+  lead_speed = max(0.0, v_ego - closing_speed)
+  lead_stopping_distance = (
+    lead_speed * lead_speed
+    / (2.0 * JEEP_CLOSING_GUARD_ASSUMED_LEAD_DECEL_MPS2)
+  )
+  available_distance = (
+    d_rel - JEEP_CLOSING_GUARD_STOP_BUFFER_M + lead_stopping_distance
+  )
+  if available_distance <= 0.0:
+    return ACCEL_MIN
+  required_decel = -(v_ego * v_ego) / (2.0 * available_distance)
+  return clip(required_decel, ACCEL_MIN, 0.0)
 
 
 def jeep_factory_sng_lead_moving(
@@ -288,6 +364,16 @@ LOW_SPEED_LAUNCH_TORQUE_MAX_NM = 320.0
 LOW_SPEED_LAUNCH_GRADE_MIN_NM = -25.0
 LOW_SPEED_LAUNCH_GRADE_MAX_NM = 50.0
 LOW_SPEED_CREEP_TIMEOUT_CYCLES = 75   # 1.5 s before fail-closed re-hold
+# Route 8 reached 334 Nm and 3.2 m/s^2 immediately after the low-speed state
+# machine handed CREEP to ordinary DRIVE. Keep the complete planner request,
+# but shape the torque conversion through the launch range: about 1.0 m/s^2 at
+# standstill, 1.1 m/s^2 through 3 m/s, then the normal 2.0 m/s^2 by 5 m/s.
+# This applies on both sides of the 0.78 m/s CREEP/DRIVE boundary, avoiding the
+# authority step without changing braking, hold, GO, or higher-speed hill
+# authority.
+LOW_SPEED_PROPULSION_ACCEL_CAP_0_MPS2 = 1.0
+LOW_SPEED_PROPULSION_ACCEL_CAP_3_MPS2 = 1.1
+LOW_SPEED_PROPULSION_ACCEL_CAP_END_MPS = 5.0
 
 # The embedded Panda rejects private cycles closer than 15 ms. Even a 20 ms
 # sender interval occasionally arrived below that threshold after USB/CAN
@@ -302,8 +388,11 @@ TRANSPORT_MIN_SEND_INTERVAL_NS = 25_000_000
 # braking fit uses 681 same-direction samples (R^2 0.740). Propulsion uses a
 # deliberately simple speed-aware feed-forward fit over 1,007 same-direction
 # samples; remaining error is handled by openpilot's normal feedback loop.
-BRAKE_ACCEL_INTERCEPT_MPS2 = -0.2176
-BRAKE_ACCEL_GAIN = 0.8012
+# Route 6b showed that the original stock-fit transform reduced a maximum
+# -3.0 request to -2.62 before transmission. Preserve the controller's units
+# directly so the guarded factory envelope can receive its complete request.
+BRAKE_ACCEL_INTERCEPT_MPS2 = 0.0
+BRAKE_ACCEL_GAIN = 1.0
 ENGINE_TORQUE_INTERCEPT_NM = 0.0
 ENGINE_TORQUE_ACCEL_GAIN = 163.5
 # b6x raised this term to 40 Nm/(m/s^2) and raised the torque slew rate at the
@@ -359,7 +448,14 @@ ENGINE_TORQUE_RATE_DOWN_NM_PER_S = 600.0
 # only a withdrawal of requested engine torque; propulsion increases retain
 # the last fault-free 300 Nm/s rate and normal coasting retains 600 Nm/s.
 BRAKE_TRANSITION_TORQUE_RATE_DOWN_NM_PER_S = 1800.0
-BRAKE_APPLY_RATE_MPS3 = 1.5
+# The production controller already jerk-limits ordinary braking. A strong
+# fused-lead request must not wait through a second 1.5 m/s^3 ramp; this rate
+# still bounds every 20 ms command step to 0.07 m/s^2.
+# The production plan can reverse its requested deceleration several times in
+# a hard approach. The Jeep brake actuator follows those reversals closely
+# enough to feel like brake/coast/brake. Preserve the requested peak and its
+# independent safety envelope, but make the physical command continuous.
+BRAKE_APPLY_RATE_MPS3 = 1.25
 BRAKE_RELEASE_RATE_MPS3 = 2.0
 ENGINE_TORQUE_ZERO_EPSILON_NM = 0.5
 BRAKE_ZERO_EPSILON_MPS2 = 0.005
@@ -546,6 +642,26 @@ def engine_torque_max_for_speed(speed_mps: float) -> float:
     ENGINE_TORQUE_LOW_SPEED_BASE_MAX_NM,
     ENGINE_TORQUE_MAX_NM,
   )
+
+
+def propulsion_accel_max_for_speed(speed_mps: float) -> float:
+  """Return the launch-range accel used only by the engine-torque mapper."""
+  speed_mps = max(0.0, float(speed_mps))
+  if speed_mps <= 3.0:
+    return (
+      LOW_SPEED_PROPULSION_ACCEL_CAP_0_MPS2
+      + (LOW_SPEED_PROPULSION_ACCEL_CAP_3_MPS2
+         - LOW_SPEED_PROPULSION_ACCEL_CAP_0_MPS2)
+      * speed_mps / 3.0
+    )
+  if speed_mps < LOW_SPEED_PROPULSION_ACCEL_CAP_END_MPS:
+    return (
+      LOW_SPEED_PROPULSION_ACCEL_CAP_3_MPS2
+      + (ACCEL_MAX - LOW_SPEED_PROPULSION_ACCEL_CAP_3_MPS2)
+      * (speed_mps - 3.0)
+      / (LOW_SPEED_PROPULSION_ACCEL_CAP_END_MPS - 3.0)
+    )
+  return ACCEL_MAX
 
 
 def move_toward(
@@ -735,6 +851,10 @@ class JeepLongitudinalShadow:
     desired_engine_torque_nm = 0.0
     grade_torque_nm = 0.0
     if eligible and not self.brake_latched and self.propulsion_latched:
+      propulsion_control_accel = min(
+        limited_accel,
+        propulsion_accel_max_for_speed(speed_mps),
+      )
       if speed_mps >= ENGINE_TORQUE_GRADE_MIN_SPEED_MPS:
         grade_torque_nm = clip(
           ENGINE_TORQUE_GRADE_GAIN_NM_PER_RAD * self.filtered_pitch_rad,
@@ -746,8 +866,9 @@ class JeepLongitudinalShadow:
       )
       base_engine_torque_nm = clip(
         ENGINE_TORQUE_INTERCEPT_NM
-        + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
-        + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * max(limited_accel, 0.0)
+        + ENGINE_TORQUE_ACCEL_GAIN * propulsion_control_accel
+        + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN
+          * max(propulsion_control_accel, 0.0)
         + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps,
         0.0,
         speed_limited_torque_max_nm,
@@ -812,6 +933,10 @@ class JeepLongitudinalShadow:
       self.brake_latched = False
       self.brake_immediate = False
       if self.propulsion_latched and limited_accel >= LOW_SPEED_LAUNCH_REQUEST_ACCEL:
+        propulsion_control_accel = min(
+          limited_accel,
+          propulsion_accel_max_for_speed(speed_mps),
+        )
         launch_grade_torque_nm = clip(
           ENGINE_TORQUE_GRADE_GAIN_NM_PER_RAD * self.filtered_pitch_rad,
           LOW_SPEED_LAUNCH_GRADE_MIN_NM,
@@ -820,8 +945,9 @@ class JeepLongitudinalShadow:
         grade_torque_nm = launch_grade_torque_nm
         launch_base_engine_torque_nm = clip(
           ENGINE_TORQUE_INTERCEPT_NM
-          + ENGINE_TORQUE_ACCEL_GAIN * limited_accel
-          + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN * max(limited_accel, 0.0)
+          + ENGINE_TORQUE_ACCEL_GAIN * propulsion_control_accel
+          + ENGINE_TORQUE_POSITIVE_ACCEL_GAIN
+            * max(propulsion_control_accel, 0.0)
           + ENGINE_TORQUE_SPEED_GAIN * calibration_speed_mps
           + launch_grade_torque_nm,
           0.0,

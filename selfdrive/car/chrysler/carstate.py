@@ -275,7 +275,7 @@ class CarState(CarStateBase):
     if radar_dbc is None:
       return None
 
-    # Frequency zero deliberately excludes this diagnostic parser from CAN
+    # Frequency zero deliberately excludes this passive radar parser from CAN
     # health checks. CarInterface also keeps it out of self.can_parsers.
     messages = [(address, 0) for address in RADAR_MSGS_C + RADAR_MSGS_D]
     return CANParser(radar_dbc, messages, 1)

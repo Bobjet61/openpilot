@@ -1,9 +1,11 @@
-"""Passive Jeep radar/vision association for diagnostic logging only.
+"""Passive Jeep radar/vision association and guarded comparison.
 
 This module has no publisher, CAN packer, or control output. It decodes the
 already-present bus-1 radar observations and compares range and relative speed
 with openpilot's vision lead. The result is intentionally not a RadarData
-message and cannot be consumed by planning or actuation.
+message and never enters production planning. A separate Jeep-specific,
+deceleration-only continuity guard may consume a confirmed comparison; this
+module itself cannot request actuation.
 """
 
 from dataclasses import dataclass

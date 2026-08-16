@@ -35,6 +35,16 @@ _A_TOTAL_MAX_BP = [20., 40.]
 
 EventName = car.CarEvent.EventName
 
+# ChryslerFlagsSP.SP_WP_S20. Keep the generic planner independent of a
+# platform-values import while limiting this runtime comfort target to the
+# guarded White-Panda Jeep openpilot-long configuration.
+JEEP_WP_S20_FLAG = 2
+# Keep the upstream six-metre stopped-lead target.  Route 8 showed that the
+# former +2 m obstacle offset made the low-speed target two metres closer just
+# when a dropped lead was reacquired, leaving too little stopping margin.
+JEEP_OP_LONG_LEAD_OBSTACLE_OFFSET_M = 0.0
+JEEP_OP_LONG_T_FOLLOW_OFFSET_S = 0.25
+
 
 def get_max_accel(v_ego):
   return interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
@@ -58,7 +68,20 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
 class LongitudinalPlanner:
   def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
-    self.mpc = LongitudinalMpc(dt=dt)
+    jeep_wp_op_long = bool(
+      CP.carName == "chrysler"
+      and CP.openpilotLongitudinalControl
+      and CP.spFlags & JEEP_WP_S20_FLAG
+    )
+    self.mpc = LongitudinalMpc(
+      dt=dt,
+      lead_obstacle_offset_m=(
+        JEEP_OP_LONG_LEAD_OBSTACLE_OFFSET_M if jeep_wp_op_long else 0.0
+      ),
+      t_follow_offset_s=(
+        JEEP_OP_LONG_T_FOLLOW_OFFSET_S if jeep_wp_op_long else 0.0
+      ),
+    )
     self.fcw = False
     self.dt = dt
 
